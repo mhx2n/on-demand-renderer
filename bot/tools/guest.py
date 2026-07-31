@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 from ..providers import copilot
-from ..utils import format_ai_answer
+from ..utils import format_ai_answer, RICH_PROMPT_HINT
 from .. import db
 from .. import richsend
 
@@ -31,6 +31,7 @@ SYSTEM_PREFIX = (
     "Use clear structure, no fluff, no apologies, no self-introduction "
     "unless asked. Prefer short paragraphs and bullet points where helpful. "
     "Keep answers under ~1500 characters when possible.\n\n"
+    + RICH_PROMPT_HINT + "\n\n"
     "User message:\n"
 )
 

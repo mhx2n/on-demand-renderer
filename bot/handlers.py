@@ -34,7 +34,7 @@ from .providers import (
     make_provider,
     rebuild_provider_from_db,
 )
-from .utils import clean_text, format_ai_answer, chunk_text, escape_html, human_size, safe_user_error, process_metrics, format_duration
+from .utils import clean_text, format_ai_answer, chunk_text, escape_html, human_size, safe_user_error, process_metrics, format_duration, RICH_PROMPT_HINT
 from .keycheck import inspect_key, try_model
 from .tools import textenc as _textenc, language as _language, photo as _photo, shorten as _shorten, stylish as _stylish, translate as _translate, ocr as _ocr
 from .tools import extras as _extras, m2t as _m2t, convert as _cv, guest as _guest
@@ -256,7 +256,7 @@ TOOL_CATALOG: dict = {
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
         ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
         ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
-        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\nReply to any message with <code>/post</code> or <code>/aipost</code> to use it as the source.\n<b>Refine:</b> reply to the preview with what to change (shorten, translate, add/remove) → it is rewritten.\n<b>Images:</b> <code>/addimg &lt;url&gt;</code>, reply to a photo with <code>/addimg</code>, or just send photos — 2+ become a native slider.\n<b>Post link:</b> <code>/linkpost https://t.me/yourchannel/123 &lt;topic&gt;</code> — or reply to a message containing that link with <code>/post</code>/<code>/aipost</code>; the bot targets that channel automatically and loads the linked post as source.\n<code>/channels</code>, <code>/delchannel</code>, <code>/clearimg</code>, <code>/postformat</code>"),
+        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\nReply to any message with <code>/post</code> or <code>/aipost</code> to use it as the source.\n<b>Refine:</b> reply to the preview with what to change (shorten, translate, add/remove) → it is rewritten.\n<b>Images:</b> <code>/addimg &lt;url&gt;</code>, reply to a photo with <code>/addimg</code>, or just send photos — 2+ become a native slider.\n<code>/channels</code>, <code>/delchannel</code>, <code>/clearimg</code>, <code>/postformat</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
@@ -1096,7 +1096,52 @@ async def cmd_vnote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 # AI provider call
 # ============================================================
+_PROGRESS_FRAMES = ("🔍 Reading your question", "🧠 Thinking", "✍️ Writing the answer")
+
+
+def _start_progress(context, chat_id: int, placeholder, name: str):
+    """Animated 'still working' note + typing action (mostly for groups)."""
+    async def _loop():
+        i, started = 0, time.time()
+        try:
+            while True:
+                await asyncio.sleep(4)
+                i += 1
+                try:
+                    await context.bot.send_chat_action(chat_id, ChatAction.TYPING)
+                except Exception:
+                    pass
+                frame = _PROGRESS_FRAMES[i % len(_PROGRESS_FRAMES)]
+                secs = int(time.time() - started)
+                try:
+                    await placeholder.edit_text(
+                        f"⏳ <b>{escape_html(name)}</b> — {frame}… <i>{secs}s</i>",
+                        parse_mode=ParseMode.HTML)
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
+    try:
+        return asyncio.create_task(_loop())
+    except Exception:
+        return None
+
+
+async def _stop_progress(task) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except Exception:
+        pass
+
+
 async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
+
                          provider_key: str, prompt: str):
     if not await force_join_ok(update, context): return
     if not prompt.strip():
@@ -1133,18 +1178,8 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if reply_context:
         prompt = reply_context + prompt
 
-    # Bot API 10.1 markup hint — nudges any provider to emit rich markdown
-    # that our renderer can convert to Telegram's native styling.
-    _MARKUP_HINT = (
-        "[Formatting] You may freely use Markdown — headings (#..######), "
-        "bullet/numbered/task lists, GitHub tables with alignment, fenced "
-        "```code blocks```, inline `code`, **bold**, *italic*, ~~strike~~, "
-        "||spoiler||, > blockquotes, >> pull quotes, <details><summary>…"
-        "</summary>…</details>, LaTeX ($inline$ or $$block$$), sub ~x~ / "
-        "sup ^x^, images ![alt](url \"credit\"), and !map[lat,lng]. Keep "
-        "tables narrow (≤4 cols, short cells) so they render well on mobile."
-    )
-    prompt = _MARKUP_HINT + "\n\n" + prompt
+    # Bot API 10.1 markup + maths hint (shared by every AI surface).
+    prompt = RICH_PROMPT_HINT + "\n\n" + prompt
 
 
     history_key = (update.effective_chat.id, root_id) if root_id else None
@@ -1159,11 +1194,20 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
     rich_draft = await richsend.begin(chat_id) if (live and is_private) else None
 
     placeholder = None
-    if live and rich_draft is None:
-        placeholder = await update.effective_message.reply_text(f"{name} is thinking...")
+    if rich_draft is None:
+        # Groups always get a visible, animated progress note so the user
+        # knows the answer is on its way even when the model is slow.
+        placeholder = await update.effective_message.reply_text(
+            f"⏳ <b>{escape_html(name)}</b> is thinking…",
+            parse_mode=ParseMode.HTML)
+
+    progress = _start_progress(context, chat_id, placeholder, name) \
+        if placeholder is not None else None
 
     try:
         answer = await asyncio.wait_for(fn(prompt, history), timeout=180)
+        await _stop_progress(progress)
+
         answer_fmt = format_ai_answer(answer) or "No content returned."
         # Clear any prior exhausted flag on success.
         try: await _mark_provider_exhausted(provider_key, False)
@@ -1200,6 +1244,7 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await db.log("INFO", update.effective_user.id, provider_key, prompt[:200])
 
     except asyncio.TimeoutError:
+        await _stop_progress(progress)
         await richsend.cancel(rich_draft)
         msg = f"{name} timed out. Please retry."
         if placeholder: await safe_edit(placeholder, msg)
@@ -1228,6 +1273,7 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
         else:
             msg = f"{name} error.\n\n`{e}`"
+        await _stop_progress(progress)
         await richsend.cancel(rich_draft)
         if placeholder: await safe_edit(placeholder, msg)
         else: await send_md(update.effective_message, msg)
@@ -2111,7 +2157,7 @@ _RESERVED_CMDS = {
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
     "rich","slide","post","aipost","channels","addchannel","delchannel",
-    "postformat","cancelpost","addimg","clearimg","richcast","linkpost",
+    "postformat","cancelpost","addimg","clearimg","richcast",
 
 }
 
@@ -3071,7 +3117,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "channels": _channel_post.cmd_channels,
             "addchannel": _channel_post.cmd_addchannel,
             "delchannel": _channel_post.cmd_delchannel,
-            "linkpost": _channel_post.cmd_linkpost,
             "postformat": _channel_post.cmd_postformat,
             "cancelpost": _channel_post.cmd_cancelpost,
             "addimg": _channel_post.cmd_addimg,
@@ -3157,7 +3202,6 @@ USER_COMMANDS = [
     BotCommand("channels","Your registered channels"),
     BotCommand("addchannel","Register a channel for posting"),
     BotCommand("addimg","Attach image(s) to the current draft"),
-    BotCommand("linkpost","Post to the channel of a t.me post link"),
     BotCommand("postformat","Rich post formatting cheat-sheet"),
 
     BotCommand("top",   "Top 10 users"),
