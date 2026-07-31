@@ -559,24 +559,41 @@ def _ig_shortcode(url: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _unescape_media_url(raw: str) -> str:
+    try:
+        out = raw.encode("utf-8").decode("unicode_escape")
+    except Exception:
+        out = raw
+    out = out.replace("\\/", "/").replace("&amp;", "&")
+    return out.strip()
+
+
+def _ig_pages(code: str) -> list[str]:
+    return [
+        f"https://www.instagram.com/p/{code}/embed/captioned/",
+        f"https://www.instagram.com/reel/{code}/embed/captioned/",
+        f"https://www.instagram.com/p/{code}/embed/",
+        f"https://www.ddinstagram.com/p/{code}/",
+        f"https://ddinstagram.com/reel/{code}/",
+        f"https://www.instagramez.com/p/{code}/",
+    ]
+
+
 def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
-    """Instagram fallback: parse embed page / public mirrors for direct video URL.
-    Used when yt-dlp's Instagram extractor is blocked (very common from server IPs).
+    """Instagram fallback: parse embed page / public mirrors.
+
+    Handles single videos, single photos, and photo carousels — used whenever
+    yt-dlp's Instagram extractor is blocked (very common from server IPs).
     """
     code = _ig_shortcode(url)
     if not code:
         return None
 
-    candidates = [
-        f"https://www.instagram.com/p/{code}/embed/captioned/",
-        f"https://www.instagram.com/reel/{code}/embed/captioned/",
-        f"https://www.ddinstagram.com/p/{code}/",
-        f"https://ddinstagram.com/reel/{code}/",
-    ]
     video_url = None
+    images: list[str] = []
     title = ""
     uploader = "Instagram"
-    for cand in candidates:
+    for cand in _ig_pages(code):
         try:
             r = requests.get(
                 cand,
@@ -591,7 +608,6 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
             if r.status_code != 200 or not r.text:
                 continue
             html = r.text
-            # Try common JSON keys
             m = (
                 re.search(r'"video_url":"([^"]+\.mp4[^"]*)"', html)
                 or re.search(r'"contentUrl":"([^"]+\.mp4[^"]*)"', html)
@@ -599,60 +615,167 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                 or re.search(r'property="og:video:secure_url"\s+content="([^"]+)"', html)
                 or re.search(r'<video[^>]+src="([^"]+\.mp4[^"]*)"', html)
             )
+            tm = re.search(r"<title>([^<]+)</title>", html)
+            if tm and not title:
+                title = tm.group(1).strip()[:200]
+            um = (re.search(r'"owner":\{"username":"([^"]+)"', html)
+                  or re.search(r'"author_name":"([^"]+)"', html))
+            if um:
+                uploader = um.group(1)
             if m:
-                video_url = m.group(1).encode("utf-8").decode("unicode_escape").replace("\\/", "/")
-                tm = re.search(r'<title>([^<]+)</title>', html)
-                if tm:
-                    title = tm.group(1).strip()[:200]
-                um = re.search(r'"owner":\{"username":"([^"]+)"', html) or \
-                     re.search(r'"author_name":"([^"]+)"', html)
-                if um:
-                    uploader = um.group(1)
+                video_url = _unescape_media_url(m.group(1))
                 break
+            if not audio_only:
+                found = re.findall(r'"display_url":"([^"]+)"', html) \
+                    or re.findall(r'property="og:image"\s+content="([^"]+)"', html) \
+                    or re.findall(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html)
+                for f in found:
+                    u = _unescape_media_url(f)
+                    if u.startswith("http") and u not in images:
+                        images.append(u)
+                if images:
+                    break
         except Exception:
             continue
 
-    if not video_url:
-        return None
-
-    try:
+    if video_url:
         path = os.path.join(workdir, f"ig_{code}.mp4")
-        with requests.get(
-            video_url, stream=True, timeout=120,
-            headers={"User-Agent": _UA_IOS, "Referer": "https://www.instagram.com/"},
-        ) as resp:
-            resp.raise_for_status()
-            total = 0
-            with open(path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1 << 15):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    total += len(chunk)
-                    if total > MAX_BYTES:
-                        f.close()
-                        os.remove(path)
-                        return None
-        size = os.path.getsize(path)
-        if size == 0:
-            os.remove(path)
-            return None
-        if audio_only:
-            path = _ensure_telegram_media(path, audio_only=True)
-            size = os.path.getsize(path)
-        return {
-            "path": path,
-            "size": size,
-            "title": title or "Instagram",
-            "uploader": uploader,
-            "duration": 0,
-            "ext": os.path.splitext(path)[1].lstrip(".") or "mp4",
-            "thumbnail": None,
-            "webpage_url": url,
-            "audio_only": audio_only,
-        }
-    except Exception:
-        return None
+        size = _download_file(video_url, path, referer="https://www.instagram.com/", ua=_UA_IOS)
+        if size:
+            if audio_only:
+                try:
+                    path = _ensure_telegram_media(path, audio_only=True)
+                    size = os.path.getsize(path)
+                except Exception:
+                    return None
+            return {
+                "path": path,
+                "size": size,
+                "title": title or "Instagram",
+                "uploader": uploader,
+                "duration": 0,
+                "ext": os.path.splitext(path)[1].lstrip(".") or "mp4",
+                "thumbnail": None,
+                "webpage_url": url,
+                "audio_only": audio_only,
+            }
+
+    if images and not audio_only:
+        paths = []
+        for i, iu in enumerate(images[:10]):
+            p = os.path.join(workdir, f"ig_{code}_{i}.jpg")
+            if _download_file(iu, p, referer="https://www.instagram.com/", ua=_UA_IOS):
+                paths.append(p)
+        if paths:
+            return {
+                "path": None,
+                "images": paths,
+                "size": sum(os.path.getsize(p) for p in paths),
+                "title": title or "Instagram",
+                "uploader": uploader,
+                "duration": 0,
+                "ext": "jpg",
+                "thumbnail": None,
+                "webpage_url": url,
+                "audio_only": False,
+            }
+    return None
+
+
+def _fb_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
+    """Facebook fallback: scrape the mobile/basic page for a direct stream."""
+    targets = [url]
+    low = (url or "").lower()
+    if "facebook.com" in low:
+        targets.append(re.sub(r"//(www\.|m\.|web\.)?facebook\.com", "//m.facebook.com", url, count=1))
+        targets.append(re.sub(r"//(www\.|m\.|web\.)?facebook\.com", "//mbasic.facebook.com", url, count=1))
+
+    media_url = None
+    images: list[str] = []
+    title = "Facebook"
+    for cand in dict.fromkeys(targets):
+        try:
+            r = requests.get(
+                cand,
+                headers={
+                    "User-Agent": _UA_IOS,
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": "https://www.facebook.com/",
+                },
+                timeout=20,
+                allow_redirects=True,
+            )
+            if r.status_code != 200 or not r.text:
+                continue
+            html = r.text
+            m = (
+                re.search(r'"browser_native_hd_url":"([^"]+)"', html)
+                or re.search(r'"browser_native_sd_url":"([^"]+)"', html)
+                or re.search(r'"playable_url_quality_hd":"([^"]+)"', html)
+                or re.search(r'"playable_url":"([^"]+)"', html)
+                or re.search(r'hd_src(?:_no_ratelimit)?:"([^"]+)"', html)
+                or re.search(r'sd_src(?:_no_ratelimit)?:"([^"]+)"', html)
+                or re.search(r'property="og:video:url"\s+content="([^"]+)"', html)
+            )
+            tm = re.search(r"<title>([^<]+)</title>", html)
+            if tm:
+                title = tm.group(1).strip()[:200] or title
+            if m:
+                media_url = _unescape_media_url(m.group(1))
+                break
+            if not audio_only:
+                for f in re.findall(r'property="og:image"\s+content="([^"]+)"', html):
+                    u = _unescape_media_url(f)
+                    if u.startswith("http") and u not in images:
+                        images.append(u)
+                if images:
+                    break
+        except Exception:
+            continue
+
+    if media_url:
+        path = os.path.join(workdir, f"fb_{int(time.time())}.mp4")
+        size = _download_file(media_url, path, referer="https://www.facebook.com/", ua=_UA_IOS)
+        if size:
+            try:
+                path = _ensure_telegram_media(path, audio_only=audio_only)
+                size = os.path.getsize(path)
+            except Exception:
+                if audio_only:
+                    return None
+            return {
+                "path": path,
+                "size": size,
+                "title": title,
+                "uploader": "Facebook",
+                "duration": 0,
+                "ext": os.path.splitext(path)[1].lstrip(".") or "mp4",
+                "thumbnail": None,
+                "webpage_url": url,
+                "audio_only": audio_only,
+            }
+
+    if images and not audio_only:
+        paths = []
+        for i, iu in enumerate(images[:10]):
+            p = os.path.join(workdir, f"fb_{i}.jpg")
+            if _download_file(iu, p, referer="https://www.facebook.com/", ua=_UA_IOS):
+                paths.append(p)
+        if paths:
+            return {
+                "path": None,
+                "images": paths,
+                "size": sum(os.path.getsize(p) for p in paths),
+                "title": title,
+                "uploader": "Facebook",
+                "duration": 0,
+                "ext": "jpg",
+                "thumbnail": None,
+                "webpage_url": url,
+                "audio_only": False,
+            }
+    return None
+
 
 
 def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
