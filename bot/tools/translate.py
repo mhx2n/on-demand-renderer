@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ChatAction
 
 from . import _mistral
+from .. import richsend
 from ..config import OWNER_ID
 from .. import db
 from ..utils import safe_user_error
@@ -138,6 +139,9 @@ async def cmd_tr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if target != "auto":
             header += f"  →  <i>{_esc(target)}</i>"
         body = f"{header}\n\n{_esc(out)}"
+        rich_head = "## Translation" + (f" → *{target}*" if target != "auto" else "")
+        if await richsend.reply(msg, f"{rich_head}\n\n{out}", placeholder=placeholder):
+            return
         try:
             await placeholder.edit_text(body, parse_mode="HTML", disable_web_page_preview=True)
         except Exception:

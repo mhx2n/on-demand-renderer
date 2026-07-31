@@ -22,7 +22,8 @@ from telegram.ext import (
 )
 from telegram import MessageEntity
 
-from . import db, downloader
+from . import db
+from . import channel_post as _channel_post, downloader
 from . import richmsg, richsend
 from .config import OWNER_ID, FORCE_JOIN_CHANNEL
 
@@ -255,6 +256,7 @@ TOOL_CATALOG: dict = {
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
         ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
         ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
+        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\n<code>/channels</code>, <code>/delchannel</code>, <code>/postformat</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
@@ -668,7 +670,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(placeholder, "Help engine unavailable.")
             return
         ans = await asyncio.wait_for(fn(feature_doc, []), timeout=60)
-        await safe_edit(placeholder, format_ai_answer(ans))
+        if not await richsend.reply(update.effective_message, ans,
+                                    placeholder=placeholder):
+            await safe_edit(placeholder, format_ai_answer(ans))
     except Exception as e:
         await safe_edit(placeholder, safe_user_error("Help"))
         await db.log("ERROR", update.effective_user.id if update.effective_user else 0, "help", str(e)[:500])
@@ -1473,7 +1477,9 @@ async def cmd_tryke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         kind = _PENDING_KIND.get(update.effective_user.id)
         out = await asyncio.wait_for(try_model(key, model, prompt, kind=kind), timeout=120)
-        await stream_edit(placeholder, f"<b>{escape_html(model)}</b>\n\n{format_ai_answer(out)}")
+        if not await richsend.reply(update.effective_message, out, title=model,
+                                    placeholder=placeholder):
+            await stream_edit(placeholder, f"<b>{escape_html(model)}</b>\n\n{format_ai_answer(out)}")
     except Exception as e:
         msg = str(e)
         # Trim long upstream JSON dumps but keep the useful bit
@@ -2066,7 +2072,8 @@ _RESERVED_CMDS = {
     "revoke","restart","mkey","mlimit","addmodel","addprovider","delprovider",
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
-    "rich","slide",
+    "rich","slide","post","aipost","channels","addchannel","delchannel",
+    "postformat","cancelpost",
 }
 
 
@@ -3021,6 +3028,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "top": cmd_top,
             "info": cmd_info, "m2t": cmd_m2t, "time": cmd_time, "vnote": cmd_vnote,
             "convert": cmd_convert, "rich": cmd_rich, "slide": cmd_slide,
+            "post": _channel_post.cmd_post, "aipost": _channel_post.cmd_aipost,
+            "channels": _channel_post.cmd_channels,
+            "addchannel": _channel_post.cmd_addchannel,
+            "delchannel": _channel_post.cmd_delchannel,
+            "postformat": _channel_post.cmd_postformat,
+            "cancelpost": _channel_post.cmd_cancelpost,
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
@@ -3095,6 +3108,11 @@ USER_COMMANDS = [
     BotCommand("convert","Universal converter (bin/hex/units/…)"),
     BotCommand("rich",  "Rich message demo / status"),
     BotCommand("slide", "Native image slider from URLs"),
+    BotCommand("post",  "Compose & publish a rich channel post"),
+    BotCommand("aipost","AI-written rich channel post"),
+    BotCommand("channels","Your registered channels"),
+    BotCommand("addchannel","Register a channel for posting"),
+    BotCommand("postformat","Rich post formatting cheat-sheet"),
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
@@ -3417,6 +3435,7 @@ def register_handlers(app: Application):
     _translate.register(app)
     _ocr.register(app)
     _guest.register(app)
+    _channel_post.register(app)
 
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(InlineQueryHandler(on_inline_query))
