@@ -2111,7 +2111,8 @@ _RESERVED_CMDS = {
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
     "rich","slide","post","aipost","channels","addchannel","delchannel",
-    "postformat","cancelpost",
+    "postformat","cancelpost","addimg","clearimg","richcast",
+
 }
 
 
