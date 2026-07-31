@@ -571,12 +571,57 @@ def _tikwm_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
 
 
 
-_IG_SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", re.IGNORECASE)
+_IG_SHORTCODE_RE = re.compile(r"instagram\.com/(?:[A-Za-z0-9_.]+/)?(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)",
+                              re.IGNORECASE)
+_IG_APP_ID = "936619743392459"
+_IG_B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
 
 def _ig_shortcode(url: str) -> Optional[str]:
     m = _IG_SHORTCODE_RE.search(url or "")
     return m.group(1) if m else None
+
+
+def _ig_media_id(shortcode: str) -> Optional[str]:
+    """Instagram shortcodes are base64(media_id) — decode back to the numeric id."""
+    try:
+        n = 0
+        for ch in shortcode:
+            n = n * 64 + _IG_B64.index(ch)
+        return str(n) if n else None
+    except Exception:
+        return None
+
+
+def _ig_canonical(url: str) -> str:
+    """Drop tracking params (?igsh=...) which often break extraction."""
+    code = _ig_shortcode(url)
+    if not code:
+        return url
+    kind = "reel" if re.search(r"/reels?/", url or "", re.IGNORECASE) else "p"
+    return f"https://www.instagram.com/{kind}/{code}/"
+
+
+def _netscape_cookies(path: str) -> dict:
+    """Read a Netscape cookie jar into a simple name→value dict."""
+    jar: dict = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) >= 7:
+                    jar[parts[5]] = parts[6]
+    except Exception:
+        pass
+    return jar
+
+
+def _ig_cookie_jar() -> dict:
+    p = _cookies_path("instagram")
+    return _netscape_cookies(p) if p else {}
 
 
 def _unescape_media_url(raw: str) -> str:
@@ -595,12 +640,79 @@ def _ig_pages(code: str) -> list[str]:
         f"https://www.instagram.com/p/{code}/embed/",
         f"https://www.ddinstagram.com/p/{code}/",
         f"https://ddinstagram.com/reel/{code}/",
+        f"https://kkinstagram.com/p/{code}/",
+        f"https://kkinstagram.com/reel/{code}/",
         f"https://www.instagramez.com/p/{code}/",
+        f"https://imginn.com/p/{code}/",
     ]
 
 
+def _ig_api_media(code: str) -> tuple[Optional[str], list[str], str, str]:
+    """Query Instagram's web API (works well once cookies are configured).
+
+    Returns (video_url, image_urls, title, uploader).
+    """
+    mid = _ig_media_id(code)
+    if not mid:
+        return None, [], "", ""
+    cookies = _ig_cookie_jar()
+    headers = {
+        "User-Agent": _UA_DESKTOP,
+        "X-IG-App-ID": _IG_APP_ID,
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://www.instagram.com/p/{code}/",
+    }
+    endpoints = [
+        f"https://www.instagram.com/api/v1/media/{mid}/info/",
+        f"https://i.instagram.com/api/v1/media/{mid}/info/",
+    ]
+    for ep in endpoints:
+        try:
+            r = requests.get(ep, headers=headers, cookies=cookies or None, timeout=20)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+        except Exception:
+            continue
+        items = (data or {}).get("items") or []
+        if not items:
+            continue
+        item = items[0]
+        uploader = ((item.get("user") or {}).get("username") or "Instagram")
+        cap = ((item.get("caption") or {}) or {}).get("text") or ""
+        title = cap.strip()[:200]
+
+        def _pick(node) -> tuple[Optional[str], Optional[str]]:
+            vids = node.get("video_versions") or []
+            if vids:
+                return vids[0].get("url"), None
+            cands = ((node.get("image_versions2") or {}).get("candidates") or [])
+            if cands:
+                return None, cands[0].get("url")
+            return None, None
+
+        carousel = item.get("carousel_media") or []
+        if carousel:
+            imgs: list[str] = []
+            for node in carousel:
+                v, i = _pick(node)
+                if v:
+                    return v, [], title, uploader
+                if i:
+                    imgs.append(i)
+            if imgs:
+                return None, imgs, title, uploader
+        v, i = _pick(item)
+        if v:
+            return v, [], title, uploader
+        if i:
+            return None, [i], title, uploader
+    return None, [], "", ""
+
+
 def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
-    """Instagram fallback: parse embed page / public mirrors.
+    """Instagram fallback: web API → embed page → public mirrors.
 
     Handles single videos, single photos, and photo carousels — used whenever
     yt-dlp's Instagram extractor is blocked (very common from server IPs).
@@ -609,54 +721,73 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
     if not code:
         return None
 
-    video_url = None
+    video_url: Optional[str] = None
     images: list[str] = []
     title = ""
     uploader = "Instagram"
-    for cand in _ig_pages(code):
-        try:
-            r = requests.get(
-                cand,
-                headers={
-                    "User-Agent": _UA_IOS,
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": "https://www.instagram.com/",
-                },
-                timeout=15,
-                allow_redirects=True,
-            )
-            if r.status_code != 200 or not r.text:
-                continue
-            html = r.text
-            m = (
-                re.search(r'"video_url":"([^"]+\.mp4[^"]*)"', html)
-                or re.search(r'"contentUrl":"([^"]+\.mp4[^"]*)"', html)
-                or re.search(r'property="og:video"\s+content="([^"]+)"', html)
-                or re.search(r'property="og:video:secure_url"\s+content="([^"]+)"', html)
-                or re.search(r'<video[^>]+src="([^"]+\.mp4[^"]*)"', html)
-            )
-            tm = re.search(r"<title>([^<]+)</title>", html)
-            if tm and not title:
-                title = tm.group(1).strip()[:200]
-            um = (re.search(r'"owner":\{"username":"([^"]+)"', html)
-                  or re.search(r'"author_name":"([^"]+)"', html))
-            if um:
-                uploader = um.group(1)
-            if m:
-                video_url = _unescape_media_url(m.group(1))
-                break
-            if not audio_only:
-                found = re.findall(r'"display_url":"([^"]+)"', html) \
-                    or re.findall(r'property="og:image"\s+content="([^"]+)"', html) \
-                    or re.findall(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html)
-                for f in found:
-                    u = _unescape_media_url(f)
-                    if u.startswith("http") and u not in images:
-                        images.append(u)
-                if images:
+
+    # 1) Official web API (best quality; honours cookies when configured)
+    try:
+        v, imgs, t, u = _ig_api_media(code)
+        if t:
+            title = t
+        if u:
+            uploader = u
+        if v:
+            video_url = v
+        elif imgs and not audio_only:
+            images = imgs
+    except Exception:
+        pass
+
+    # 2) HTML scraping of embed pages / public mirrors
+    if not video_url and not images:
+        for cand in _ig_pages(code):
+            try:
+                r = requests.get(
+                    cand,
+                    headers={
+                        "User-Agent": _UA_IOS,
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": "https://www.instagram.com/",
+                    },
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                if r.status_code != 200 or not r.text:
+                    continue
+                html = r.text
+                m = (
+                    re.search(r'"video_url":"([^"]+\.mp4[^"]*)"', html)
+                    or re.search(r'"contentUrl":"([^"]+\.mp4[^"]*)"', html)
+                    or re.search(r'"playback_url":"([^"]+)"', html)
+                    or re.search(r'property="og:video"\s+content="([^"]+)"', html)
+                    or re.search(r'property="og:video:secure_url"\s+content="([^"]+)"', html)
+                    or re.search(r'<video[^>]+src="([^"]+\.mp4[^"]*)"', html)
+                    or re.search(r'href="(https?://[^"]+\.mp4[^"]*)"', html)
+                )
+                tm = re.search(r"<title>([^<]+)</title>", html)
+                if tm and not title:
+                    title = tm.group(1).strip()[:200]
+                um = (re.search(r'"owner":\{"username":"([^"]+)"', html)
+                      or re.search(r'"author_name":"([^"]+)"', html))
+                if um:
+                    uploader = um.group(1)
+                if m:
+                    video_url = _unescape_media_url(m.group(1))
                     break
-        except Exception:
-            continue
+                if not audio_only:
+                    found = re.findall(r'"display_url":"([^"]+)"', html) \
+                        or re.findall(r'property="og:image"\s+content="([^"]+)"', html) \
+                        or re.findall(r'class="EmbeddedMediaImage"[^>]+src="([^"]+)"', html)
+                    for f in found:
+                        u2 = _unescape_media_url(f)
+                        if u2.startswith("http") and u2 not in images:
+                            images.append(u2)
+                    if images:
+                        break
+            except Exception:
+                continue
 
     if video_url:
         path = os.path.join(workdir, f"ig_{code}.mp4")
@@ -668,6 +799,13 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                     size = os.path.getsize(path)
                 except Exception:
                     return None
+            else:
+                try:
+                    path = _ensure_telegram_media(path, audio_only=False)
+                    size = os.path.getsize(path)
+                except Exception:
+                    pass
+            meta = _probe_media(path) if not audio_only else {}
             return {
                 "path": path,
                 "size": size,
@@ -675,6 +813,8 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                 "uploader": uploader,
                 "duration": 0,
                 "ext": os.path.splitext(path)[1].lstrip(".") or "mp4",
+                "width": meta.get("width") or 0,
+                "height": meta.get("height") or 0,
                 "thumbnail": None,
                 "webpage_url": url,
                 "audio_only": audio_only,
@@ -700,6 +840,7 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                 "audio_only": False,
             }
     return None
+
 
 
 def _fb_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
@@ -806,17 +947,23 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
     if platform == "generic":
         raise RuntimeError("[generic] Only Facebook, Instagram, and TikTok links are allowed.")
 
+    if platform == "instagram":
+        # Strip ?igsh= / utm tracking — those frequently break extraction.
+        url = _ig_canonical(url)
+
     # TikTok: try tikwm.com first — it bypasses most yt-dlp issues.
     if platform == "tiktok":
         tik = _tikwm_download(url, workdir, audio_only)
         if tik:
             return tik
 
-    # Instagram: try embed/mirror fallback first — yt-dlp is usually blocked from servers.
-    if platform == "instagram":
+    # Instagram: when a cookie jar exists yt-dlp is the most reliable path, so
+    # only run the scraping fallback first when we have no cookies.
+    if platform == "instagram" and not _cookies_path("instagram"):
         ig = _ig_fallback_download(url, workdir, audio_only)
         if ig:
             return ig
+
 
     # Pre-flight probe (non-fatal if it fails — some sites block extraction-only).
     try:
@@ -1064,7 +1211,15 @@ def user_error_text(err: Exception) -> str:
         return "<b>Only Facebook, Instagram and TikTok links are supported ❌</b>"
     if "timed out" in low or "timeout" in low:
         return "<b>The site took too long to respond. Please try again ❌</b>"
+    if platform == "instagram" and any(t in low for t in (
+        "login", "cookies", "isn't available to everyone", "certain audiences",
+        "restricted", "private", "csrf", "rate-limit", "429",
+    )):
+        return ("<b>Instagram blocked this download 🔒</b>\n"
+                "This post is login-restricted. Ask the owner to add an "
+                "Instagram cookie file (<code>IG_COOKIES_FILE</code>) to unlock it.")
     return "<b>No downloadable video was found ❌</b>"
+
 
 
 def cleanup(info: dict):

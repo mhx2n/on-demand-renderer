@@ -256,7 +256,7 @@ TOOL_CATALOG: dict = {
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
         ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
         ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
-        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\nReply to any message with <code>/post</code> or <code>/aipost</code> to use it as the source.\n<b>Refine:</b> reply to the preview with what to change (shorten, translate, add/remove) → it is rewritten.\n<b>Images:</b> <code>/addimg &lt;url&gt;</code>, reply to a photo with <code>/addimg</code>, or just send photos — 2+ become a native slider.\n<code>/channels</code>, <code>/delchannel</code>, <code>/clearimg</code>, <code>/postformat</code>"),
+        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\nReply to any message with <code>/post</code> or <code>/aipost</code> to use it as the source.\n<b>Refine:</b> reply to the preview with what to change (shorten, translate, add/remove) → it is rewritten.\n<b>Images:</b> <code>/addimg &lt;url&gt;</code>, reply to a photo with <code>/addimg</code>, or just send photos — 2+ become a native slider.\n<b>Post link:</b> <code>/linkpost https://t.me/yourchannel/123 &lt;topic&gt;</code> — or reply to a message containing that link with <code>/post</code>/<code>/aipost</code>; the bot targets that channel automatically and loads the linked post as source.\n<code>/channels</code>, <code>/delchannel</code>, <code>/clearimg</code>, <code>/postformat</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
@@ -2111,7 +2111,7 @@ _RESERVED_CMDS = {
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
     "rich","slide","post","aipost","channels","addchannel","delchannel",
-    "postformat","cancelpost","addimg","clearimg","richcast",
+    "postformat","cancelpost","addimg","clearimg","richcast","linkpost",
 
 }
 
@@ -3071,6 +3071,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "channels": _channel_post.cmd_channels,
             "addchannel": _channel_post.cmd_addchannel,
             "delchannel": _channel_post.cmd_delchannel,
+            "linkpost": _channel_post.cmd_linkpost,
             "postformat": _channel_post.cmd_postformat,
             "cancelpost": _channel_post.cmd_cancelpost,
             "addimg": _channel_post.cmd_addimg,
@@ -3156,6 +3157,7 @@ USER_COMMANDS = [
     BotCommand("channels","Your registered channels"),
     BotCommand("addchannel","Register a channel for posting"),
     BotCommand("addimg","Attach image(s) to the current draft"),
+    BotCommand("linkpost","Post to the channel of a t.me post link"),
     BotCommand("postformat","Rich post formatting cheat-sheet"),
 
     BotCommand("top",   "Top 10 users"),
