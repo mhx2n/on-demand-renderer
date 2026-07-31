@@ -253,9 +253,12 @@ TOOL_CATALOG: dict = {
         ("time",  "World Time","World clock + monthly calendar for any country.\n\n<b>Usage:</b>\n<code>/time bd</code>, <code>/time us</code>, <code>/time jp</code> …"),
         ("vnote", "Video → Note","Convert any reply-video into a circular Telegram video note (max 60s).\n\n<b>Usage:</b> Reply to a video with <code>/vnote</code> or <code>.vnote</code>."),
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
+        ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
+        ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
+
     ],
 }
 
