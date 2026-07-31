@@ -1600,6 +1600,41 @@ async def _run_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     f"Size: {human_size(info['size'])}"
                 )
             except Exception: pass
+            images = info.get("images") or []
+            if images:
+                await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+                title = clean_text(info.get("title") or "Photo")
+                uploader = clean_text(info.get("uploader") or "")
+                caption = clean_text(f"{title}\n{uploader}".strip())[:900]
+                sent = False
+                if len(images) > 1 and richsend.enabled():
+                    try:
+                        blobs = [open(p, "rb").read() for p in images[:10]]
+                        sent = bool(await richmsg.send_slideshow(chat_id, blobs, caption=caption))
+                    except Exception:
+                        sent = False
+                if not sent:
+                    try:
+                        if len(images) == 1:
+                            with open(images[0], "rb") as f:
+                                await context.bot.send_photo(chat_id, f, caption=caption)
+                        else:
+                            media = []
+                            for i, p in enumerate(images[:10]):
+                                media.append(InputMediaPhoto(
+                                    open(p, "rb"), caption=caption if i == 0 else None))
+                            await context.bot.send_media_group(chat_id, media)
+                    except Exception:
+                        for p in images[:10]:
+                            try:
+                                with open(p, "rb") as f:
+                                    await context.bot.send_document(chat_id, f)
+                            except Exception:
+                                pass
+                try: await status.delete()
+                except Exception: pass
+                await db.log("INFO", update.effective_user.id, "dl", url[:200])
+                return
             await context.bot.send_chat_action(
                 chat_id,
                 ChatAction.UPLOAD_VOICE if audio_only else ChatAction.UPLOAD_VIDEO,
@@ -1609,6 +1644,7 @@ async def _run_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
             caption = clean_text(f"{title}\n{uploader} • {human_size(info['size'])}")[:900]
             width = info.get("width") or None
             height = info.get("height") or None
+
             with open(info["path"], "rb") as f:
                 if info.get("audio_only"):
                     await context.bot.send_audio(
