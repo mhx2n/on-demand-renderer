@@ -13,6 +13,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from . import _mistral
 from .. import richsend
 from ..config import OWNER_ID
+from ..utils import clean_text, format_ai_answer, safe_user_error
 
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap
 MAX_OUT_CHARS = 3500  # Telegram message safety; longer goes as a file
@@ -108,19 +109,31 @@ async def cmd_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     target_lang = _parse_target(msg.text or "")
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
-    placeholder = await msg.reply_text("Extracting text from image...")
+    placeholder = await msg.reply_text("🔍 Extracting text from image…")
 
     prompt = (
-        "You are a high-accuracy OCR engine. Extract ALL visible text from this image "
-        "exactly as it appears. Preserve the original language, line breaks, lists, "
-        "punctuation, numbers and order. Do NOT translate. Do NOT add commentary, "
-        "explanations, headings, or quotation marks. If the image has no readable text, "
-        "reply with exactly: NO_TEXT_FOUND"
+        "You are a high-accuracy OCR + document-structuring engine. Read EVERY "
+        "visible element of this image and reproduce it as Telegram Rich "
+        "Message Markdown:\n"
+        "• Keep the original language, wording, order and line breaks.\n"
+        "• Tabular content → a GitHub pipe table with an alignment row.\n"
+        "• Headings → '#'/'##', lists → '-' bullets or '1.' numbers, "
+        "checkboxes → '- [ ]' / '- [x]'.\n"
+        "• EVERY formula, equation, unit or mathematical symbol → LaTeX: "
+        "$…$ inline and $$…$$ for display maths (\\frac, \\sqrt, \\int, \\sum, "
+        "^, _). Never rewrite maths as plain ASCII.\n"
+        "• Code / terminal text → a fenced ``` block. Handwriting → transcribe "
+        "as-is.\n"
+        "Do NOT translate, do NOT summarise, add no commentary. If there is no "
+        "readable text, reply with exactly: NO_TEXT_FOUND"
     )
 
     try:
         raw = await _mistral.vision_extract(img_bytes, prompt, mime=mime, timeout=120)
         raw = (raw or "").strip()
+        if raw.startswith("```") and raw.endswith("```") and raw.count("```") == 2:
+            # unwrap an accidental whole-answer fence
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         if not raw or raw.upper().startswith("NO_TEXT_FOUND"):
             await placeholder.edit_text(
                 "No readable text was found in this image.\n"
@@ -131,7 +144,7 @@ async def cmd_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
         translated = ""
         if target_lang:
             try:
-                await placeholder.edit_text("Text extracted. Translating...")
+                await placeholder.edit_text("Text extracted. Translating…")
             except Exception:
                 pass
             try:
@@ -139,7 +152,9 @@ async def cmd_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     messages=[
                         {"role": "system",
                          "content": f"You are a professional translator. Translate the user's text into {target_lang}. "
-                                    "Preserve meaning and formatting. Reply with the translation only."},
+                                    "Keep ALL Markdown structure intact: tables stay tables, LaTeX "
+                                    "($…$ / $$…$$) stays untouched, lists stay lists, code blocks stay "
+                                    "verbatim. Reply with the translation only."},
                         {"role": "user", "content": raw},
                     ],
                     max_tokens=1800, temperature=0.2, timeout=60,
@@ -148,52 +163,46 @@ async def cmd_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 translated = "[translation unavailable]"
 
-        # Build output
+        rich_md = f"## 🔎 OCR — Extracted\n\n{raw}"
         if translated:
-            body = (
-                f"<b>OCR — Extracted</b>\n<pre>{_esc(raw)}</pre>\n\n"
-                f"<b>Translation</b> → <i>{_esc(target_lang)}</i>\n<pre>{_esc(translated)}</pre>"
-            )
-        else:
-            body = f"<b>OCR — Extracted Text</b>\n<pre>{_esc(raw)}</pre>"
+            rich_md += f"\n\n## 🌐 Translation → *{target_lang}*\n\n{translated}"
 
-        if len(body) <= MAX_OUT_CHARS:
-            rich_md = f"## OCR — Extracted\n\n```\n{raw}\n```"
-            if translated:
-                rich_md += f"\n\n## Translation → *{target_lang}*\n\n```\n{translated}\n```"
+        plain_len = len(rich_md)
+        if plain_len <= MAX_OUT_CHARS:
             if await richsend.reply(msg, rich_md, placeholder=placeholder):
                 return
-
-        # Long output -> send as .txt file
-        if len(body) > MAX_OUT_CHARS:
+            html_body = format_ai_answer(rich_md)
             try:
-                await placeholder.delete()
+                await placeholder.edit_text(html_body, parse_mode=ParseMode.HTML,
+                                            disable_web_page_preview=True)
+                return
             except Exception:
-                pass
-            doc = io.BytesIO()
-            content = raw
-            if translated:
-                content += f"\n\n--- Translation ({target_lang}) ---\n{translated}"
-            doc.write(content.encode("utf-8"))
-            doc.seek(0)
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
-                document=doc, filename="ocr.txt",
-                caption="Extracted text (too long for a message).",
-                reply_to_message_id=msg.message_id,
-            )
-            return
+                try:
+                    await placeholder.edit_text(clean_text(rich_md)[:4000])
+                    return
+                except Exception:
+                    pass
 
+        # Long output -> send as .md file
         try:
-            await placeholder.edit_text(body, parse_mode=ParseMode.HTML,
-                                        disable_web_page_preview=True)
+            await placeholder.delete()
         except Exception:
-            await placeholder.edit_text(raw)
+            pass
+        doc = io.BytesIO()
+        doc.write(rich_md.encode("utf-8"))
+        doc.seek(0)
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=doc, filename="ocr.md",
+            caption="Extracted text (too long for a message).",
+            reply_to_message_id=msg.message_id,
+        )
     except Exception:
         try:
             await placeholder.edit_text(safe_user_error("OCR"))
         except Exception:
             pass
+
 
 
 def register(app: Application):

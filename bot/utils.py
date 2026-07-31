@@ -466,3 +466,27 @@ def process_metrics(started_at: int | None = None) -> dict:
         "cpu_count": os.cpu_count() or 1,
         "uptime_s": max(0, now - int(started_at or now)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared "rich answer" instruction — appended to every AI prompt so that all
+# providers (Gemini, Copilot, Perplexity, Mistral…) format maths, tables and
+# structure exactly the way Telegram's Rich Messages render them.
+# ---------------------------------------------------------------------------
+RICH_PROMPT_HINT = (
+    "[Formatting rules — follow strictly]\n"
+    "Answer in Markdown that Telegram Rich Messages can render natively:\n"
+    "• Headings `#`..`###`, **bold**, *italic*, ~~strike~~, ||spoiler||, "
+    "`inline code`, ```fenced code```, > quotes, bullet / numbered / task lists.\n"
+    "• Tables: GitHub pipe tables with an alignment row, ≤4 columns and short "
+    "cells so they stay readable on mobile.\n"
+    "• MATH IS MANDATORY IN LaTeX: wrap every inline formula, variable, unit or "
+    "number-with-symbols in $…$ and every derivation, equation or multi-step "
+    "result in a $$…$$ block. Never write maths as plain ASCII (no ^, no /, no "
+    "sqrt()). Use \\frac, \\sqrt, \\int, \\sum, \\lim, \\times, \\cdot, "
+    "\\Rightarrow, subscripts and superscripts. Show step-by-step derivations, "
+    "each step on its own $$…$$ line, and put the final result in a "
+    "$$\\boxed{…}$$ block.\n"
+    "• Use <details><summary>…</summary>…</details> for long optional extras.\n"
+    "• Answer in the same language the user wrote in. No meta-commentary."
+)

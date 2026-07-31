@@ -141,20 +141,41 @@ async def _resolve(chat_id: int):
         return _peer(chat_id)
 
 
+#: Errors that mean "this particular call was wrong" — never a reason to
+#: disable the whole rich layer.
+_SOFT_ERRORS = (
+    "RICH_MESSAGE_CONTENT_REQUIRED", "RICH_MESSAGE_EMPTY", "MESSAGE_EMPTY",
+    "MESSAGE_NOT_MODIFIED", "FLOOD", "TIMEOUT", "SLOWMODE",
+    "MESSAGE_ID_INVALID", "PEER_ID_INVALID", "CHAT_WRITE_FORBIDDEN",
+    "USER_IS_BLOCKED", "TOPIC_CLOSED",
+)
+#: Errors that really mean the DC/layer does not support rich messages.
+_HARD_ERRORS = ("CONSTRUCTOR", "LAYER", "METHOD_INVALID", "RICH_MESSAGE_INVALID",
+                "RICH_MESSAGE_UNSUPPORTED", "INPUT_RICH")
+
+
 def _mark_unsupported(exc: Exception) -> None:
     global _rich_supported
     msg = str(exc).upper()
-    for token in ("RICH_MESSAGE", "MSG_RICH", "INPUT_RICH", "CONSTRUCTOR", "LAYER"):
+    if any(tok in msg for tok in _SOFT_ERRORS):
+        return
+    for token in _HARD_ERRORS:
         if token in msg:
             _rich_supported = False
             log.warning("Rich messages disabled at runtime: %s", exc)
             return
 
 
+async def _call(request, timeout: float = 25.0):
+    """Invoke a Telethon request with a hard timeout (never hangs the bot)."""
+    return await asyncio.wait_for(_client(request), timeout=timeout)
+
+
 def _plain(markdown: str) -> str:
     """Fallback message body Telegram shows on old clients."""
     from .utils import clean_text
-    return (clean_text(markdown) or markdown or "")[:MAX_RICH_LEN]
+    text = (clean_text(markdown) or markdown or "").strip()
+    return (text or "…")[:MAX_RICH_LEN]
 
 
 # ------------------------------------------------------------------ sending
@@ -167,15 +188,18 @@ async def send_markdown(chat_id: int, markdown: str, reply_to: int | None = None
         kw = {}
         if reply_to:
             kw["reply_to"] = types.InputReplyToMessage(reply_to_msg_id=int(reply_to))
-        res = await _client(functions.messages.SendMessageRequest(
+        res = await _call(functions.messages.SendMessageRequest(
             peer=await _resolve(chat_id),
             message=_plain(md),
             random_id=helpers.generate_random_long(),
             rich_message=types.InputRichMessageMarkdown(markdown=md),
             no_webpage=True,
             **kw,
-        ))
+        ), timeout=30.0)
         return _extract_id(res)
+    except asyncio.TimeoutError:
+        log.debug("send_markdown timed out")
+        return None
     except Exception as e:
         _mark_unsupported(e)
         log.debug("send_markdown failed: %s", e)
@@ -187,17 +211,20 @@ async def edit_markdown(chat_id: int, message_id: int, markdown: str) -> bool:
         return False
     md = markdown[:MAX_RICH_LEN]
     try:
-        await _client(functions.messages.EditMessageRequest(
+        await _call(functions.messages.EditMessageRequest(
             peer=await _resolve(chat_id),
             id=int(message_id),
             message=_plain(md),
             rich_message=types.InputRichMessageMarkdown(markdown=md),
             no_webpage=True,
-        ))
+        ), timeout=20.0)
         return True
+    except asyncio.TimeoutError:
+        return False
     except Exception as e:
         _mark_unsupported(e)
         log.debug("edit_markdown failed: %s", e)
+
         return False
 
 
@@ -251,6 +278,7 @@ class Draft:
         self.random_id = abs(helpers.generate_random_long()) if _TELETHON_OK else 0
         self._peer = None
         self._task: asyncio.Task | None = None
+        self._html_thinking = True   # falls back to markdown if the DC refuses
         self.ok = available() and self.chat_id >= 0
 
     async def _push(self, rich) -> bool:
@@ -259,28 +287,49 @@ class Draft:
         try:
             if self._peer is None:
                 self._peer = await _resolve(self.chat_id)
-            await _client(functions.messages.SetTypingRequest(
+            await _call(functions.messages.SetTypingRequest(
                 peer=self._peer,
                 action=types.InputSendMessageRichMessageDraftAction(
                     random_id=self.random_id,
                     rich_message=rich,
                 ),
-            ))
+            ), timeout=10.0)
             return True
+        except asyncio.TimeoutError:
+            return False
         except Exception as e:
+            up = str(e).upper()
+            if "RICH_MESSAGE_CONTENT_REQUIRED" in up:
+                # Empty/unsupported draft body — degrade this draft only,
+                # never the global rich layer.
+                self._html_thinking = False
+                log.debug("draft content rejected, switching to markdown drafts")
+                return False
             _mark_unsupported(e)
             self.ok = False
             log.debug("draft push failed: %s", e)
             return False
 
     async def html(self, html_text: str) -> bool:
+        if not (html_text or "").strip():
+            return False
         return await self._push(types.InputRichMessageHTML(html=html_text))
 
     async def markdown(self, md: str) -> bool:
+        md = (md or "").strip()
+        if not md:
+            return False
         return await self._push(types.InputRichMessageMarkdown(markdown=md[:MAX_RICH_LEN]))
 
     async def thinking(self, label: str = "Thinking") -> bool:
-        return await self.html(f"<tg-thinking>{label}…</tg-thinking>")
+        text = f"{label}…"
+        if self._html_thinking:
+            if await self.html(f"<tg-thinking>{text}</tg-thinking>\n<p>{text}</p>"):
+                return True
+            if not self.ok:
+                return False
+        return await self.markdown(f"> _{text}_")
+
 
     def start_thinking(self, labels: list[str] | None = None, interval: float = 0.9):
         """Background 'thinking' animation until stop() is called."""
@@ -332,12 +381,14 @@ def _fetch(url: str) -> bytes:
 async def _upload_photo(peer, source, name: str = "img.jpg"):
     """source: url string or raw bytes -> InputPhoto"""
     data = source if isinstance(source, (bytes, bytearray)) else await asyncio.to_thread(_fetch, source)
-    file = await _client.upload_file(io.BytesIO(bytes(data)), file_name=name)
-    res = await _client(functions.messages.UploadMediaRequest(
+    file = await asyncio.wait_for(
+        _client.upload_file(io.BytesIO(bytes(data)), file_name=name), timeout=90.0)
+    res = await _call(functions.messages.UploadMediaRequest(
         peer=peer, media=types.InputMediaUploadedPhoto(file=file),
-    ))
+    ), timeout=90.0)
     p = res.photo
     return types.InputPhoto(id=p.id, access_hash=p.access_hash, file_reference=p.file_reference)
+
 
 
 async def send_slideshow(chat_id: int, images: list, caption: str = "",
@@ -382,15 +433,19 @@ async def send_slideshow(chat_id: int, images: list, caption: str = "",
         kw = {}
         if reply_to:
             kw["reply_to"] = types.InputReplyToMessage(reply_to_msg_id=int(reply_to))
-        res = await _client(functions.messages.SendMessageRequest(
+        res = await _call(functions.messages.SendMessageRequest(
             peer=peer,
             message=caption or "slideshow",
             random_id=helpers.generate_random_long(),
             rich_message=rich,
             **kw,
-        ))
+        ), timeout=60.0)
         return _extract_id(res)
+    except asyncio.TimeoutError:
+        log.debug("send_slideshow timed out")
+        return None
     except Exception as e:
         _mark_unsupported(e)
         log.debug("send_slideshow failed: %s", e)
+
         return None

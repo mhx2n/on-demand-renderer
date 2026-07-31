@@ -79,7 +79,7 @@
 
 ```mermaid
 flowchart LR
-    A["/post · /aipost · /linkpost"] --> B{Source}
+    A["/post · /aipost"] --> B{Source}
     B -->|typed markdown| C[Draft]
     B -->|replied message| C
     B -->|t.me post link| C
@@ -98,7 +98,6 @@ flowchart LR
 | `/channels` · `/delchannel` | Manage registered channels |
 | `/post [markdown]` | Compose manually or from a replied message |
 | `/aipost <topic>` | AI writes the whole post |
-| **`/linkpost <t.me/ch/123>`** | **Paste or reply to a channel post link → that channel is auto-targeted, the linked post is loaded as source, then generate & publish** |
 | `/addimg <url>` · `/clearimg` | Multi-image slider control (up to 10) |
 | `/richcast [ai <topic>]` | 👑 Owner: same studio → broadcast to every user |
 | `/postformat` · `/cancelpost` | Cheat-sheet · abort |

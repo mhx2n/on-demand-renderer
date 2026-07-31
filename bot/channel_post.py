@@ -16,7 +16,7 @@ Commands
     /aipost <topic>             let AI write the post (also works as a reply)
     /addimg <url…>              attach image(s) to the current draft
     /clearimg                   drop attached images
-    /linkpost <t.me link>       post into the channel of that post link
+    
     /richcast [topic]           owner-only: same studio, broadcast to all users
     /postformat                 cheat-sheet of the supported rich markup
     /cancelpost                 abort
@@ -49,7 +49,7 @@ from telegram.ext import (
 from . import db, richmsg, richsend
 from .config import OWNER_ID
 from .providers import REGISTRY
-from .utils import clean_text, format_ai_answer
+from .utils import clean_text, format_ai_answer, RICH_PROMPT_HINT
 
 log = logging.getLogger("channel_post")
 
@@ -165,6 +165,7 @@ def _all_images(uid: int, inline: list[str]) -> list:
 
 
 async def _ai(prompt: str) -> str | None:
+    prompt = RICH_PROMPT_HINT + "\n\n" + prompt
     for key in ("g", "pr", "co"):
         meta = REGISTRY.get(key)
         if not meta:
@@ -204,73 +205,8 @@ async def _resolve_channel(context, ref: str):
         return None
 
 
-# ------------------------------------------------------- channel post links
-_POST_LINK_RE = re.compile(
-    r"(?:https?://)?(?:www\.)?t(?:elegram)?\.me/(c/(\d+)|[A-Za-z][A-Za-z0-9_]{3,})/(\d+)(?:/(\d+))?",
-    re.IGNORECASE,
-)
 
 
-def find_post_link(text: str) -> tuple[str | int, int] | None:
-    """Return (chat_ref, message_id) for the first t.me post link found."""
-    m = _POST_LINK_RE.search(text or "")
-    if not m:
-        return None
-    private_id, name_or_c, mid = m.group(2), m.group(1), m.group(3)
-    # topic links (t.me/name/topic/msg) → last number is the message id
-    if m.group(4):
-        mid = m.group(4)
-    try:
-        message_id = int(mid)
-    except Exception:
-        return None
-    if private_id:
-        return int(f"-100{private_id}"), message_id
-    return f"@{name_or_c}", message_id
-
-
-async def _link_channel(context, uid: int, ref: str | int):
-    """Resolve + authorise a channel from a post link, registering it silently."""
-    chat = None
-    try:
-        chat = await context.bot.get_chat(ref)
-    except Exception:
-        chat = None
-    if chat is None:
-        return None, "I can't access that channel — add me there as an administrator first."
-    if not await _bot_is_admin(context, chat.id):
-        return None, "I'm not an administrator in that channel yet."
-    if not await _user_is_admin(context, chat.id, uid):
-        return None, "Only administrators of that channel can post through me."
-    try:
-        await db.add_channel(chat.id, uid, chat.title or "", chat.username or "")
-    except Exception as e:
-        log.debug("auto-register channel failed: %s", e)
-    return chat, ""
-
-
-async def _fetch_link_post(context, chat_id: int, message_id: int, scratch_chat: int):
-    """Copy the linked post into the user's chat to read it, then remove it.
-
-    Returns (text, image_bytes|None). Never raises.
-    """
-    text, image = "", None
-    tmp = None
-    try:
-        tmp = await context.bot.forward_message(
-            chat_id=scratch_chat, from_chat_id=chat_id,
-            message_id=message_id, disable_notification=True)
-        text = (getattr(tmp, "text", None) or getattr(tmp, "caption", None) or "").strip()
-        image = await _photo_bytes(context, tmp)
-    except Exception as e:
-        log.debug("link post fetch failed: %s", e)
-    finally:
-        if tmp is not None:
-            try:
-                await context.bot.delete_message(scratch_chat, tmp.message_id)
-            except Exception:
-                pass
-    return text, image
 
 
 
@@ -392,35 +328,8 @@ def _replied_text(msg) -> str:
     return (rep.text or rep.caption or "").strip()
 
 
-async def _apply_link(context, msg, uid: int, *texts: str):
-    """Detect a t.me post link, target that channel and pull the post content.
 
-    Returns (handled_error: bool, source_text: str).
-    """
-    st = _st(uid)
-    found = None
-    for t in texts:
-        found = find_post_link(t or "")
-        if found:
-            break
-    if not found:
-        return False, ""
-    ref, mid = found
-    chat, err = await _link_channel(context, uid, ref)
-    if chat is None:
-        await msg.reply_text(err)
-        return True, ""
-    st["chat_id"] = chat.id
-    st["target"] = "channel"
-    st["link_mid"] = mid
-    text, image = await _fetch_link_post(context, chat.id, mid, msg.chat_id)
-    if image:
-        st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [image]
-    await msg.reply_text(
-        f"🔗 Target locked: <b>{_esc(chat.title or str(chat.id))}</b>"
-        + ("\n📄 Linked post loaded as source." if text else ""),
-        parse_mode=ParseMode.HTML)
-    return False, text
+
 
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,25 +343,16 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st.update({"draft": "", "chat_id": None, "mode": None,
                "target": "channel", "images": [], "ctrl_ids": set()})
 
-    stop, linked = await _apply_link(context, msg, uid, draft, replied)
-    if stop:
-        return
-    if linked:
-        draft = draft or linked
-    elif not draft:
+    if not draft:
         draft = replied
-    # strip a bare link-only draft
-    if draft and find_post_link(draft) and len(draft) < 120:
-        draft = linked or ""
     st["draft"] = draft
 
-    if not st.get("chat_id") and not await db.list_channels(uid):
+    if not await db.list_channels(uid):
         await msg.reply_text(
             "First register a channel: /addchannel @yourchannel\n"
-            "Or reply to / paste a link of a post from your channel "
-            "(https://t.me/yourchannel/123).\n"
             "See /postformat for the supported rich markup.")
         return
+
 
     rep = getattr(msg, "reply_to_message", None)
     if rep is not None:
@@ -484,20 +384,11 @@ async def cmd_aipost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _st(uid)
     st.update({"target": "channel", "chat_id": None, "draft": "",
                "images": [], "ctrl_ids": set(), "mode": None})
-
-    stop, linked = await _apply_link(context, msg, uid, topic, source)
-    if stop:
-        return
-    if linked:
-        source = linked
-    if topic and find_post_link(topic):
-        topic = _POST_LINK_RE.sub("", topic).strip()
-
-    if not st.get("chat_id") and not await db.list_channels(uid):
+    if not await db.list_channels(uid):
         await msg.reply_text(
-            "First register a channel: /addchannel @yourchannel — or reply to a "
-            "link of a post from your channel (https://t.me/yourchannel/123).")
+            "First register a channel: /addchannel @yourchannel")
         return
+
 
     rep = getattr(msg, "reply_to_message", None)
     if rep is not None:
@@ -590,42 +481,6 @@ async def cmd_clearimg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("Images cleared.")
 
 
-async def cmd_linkpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Post to the channel of a t.me post link (given or replied to)."""
-    msg = update.effective_message
-    uid = update.effective_user.id
-    arg = " ".join(context.args or []).strip()
-    replied = _replied_text(msg)
-    st = _st(uid)
-    st.update({"target": "channel", "chat_id": None, "draft": "",
-               "images": [], "ctrl_ids": set(), "mode": None})
-
-    stop, linked = await _apply_link(context, msg, uid, arg, replied)
-    if stop:
-        return
-    if not st.get("chat_id"):
-        await msg.reply_text(
-            "Send or reply to a channel post link, e.g.\n"
-            "<code>/linkpost https://t.me/yourchannel/123 write an update about X</code>",
-            parse_mode=ParseMode.HTML)
-        return
-
-    instruction = _POST_LINK_RE.sub("", arg).strip()
-    source = linked or (replied if not find_post_link(replied) else "")
-    if instruction and source:
-        topic = f"{instruction}\n\nSource material:\n{source}"
-    elif instruction:
-        topic = instruction
-    elif source:
-        topic = f"Turn this into a polished channel post:\n\n{source}"
-    else:
-        st["mode"] = "await_topic"
-        sent = await msg.reply_text(
-            "What should the post be about? Send the topic — or send the finished "
-            "rich markdown and I'll publish it as-is.")
-        _track(uid, sent)
-        return
-    await _generate_and_preview(msg, uid, topic)
 
 
 async def cmd_cancelpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,6 +552,32 @@ async def _target_name(uid: int) -> str:
     return ch[2] if ch and ch[2] else str(st.get("chat_id"))
 
 
+async def _wipe_preview(msg, uid: int) -> None:
+    """Delete the previous preview (text, images, controls, image notes)."""
+    st = _st(uid)
+    ids = list(st.get("preview_ids") or [])
+    note = st.get("img_note_id")
+    if note:
+        ids.append(note)
+    st["preview_ids"] = []
+    st["img_note_id"] = None
+    bot = msg.get_bot()
+    for mid in ids:
+        if not mid:
+            continue
+        try:
+            await bot.delete_message(msg.chat_id, mid)
+        except Exception:
+            pass
+        st.get("ctrl_ids", set()).discard(mid)
+
+
+def _keep(uid: int, mid) -> None:
+    if not mid:
+        return
+    _st(uid).setdefault("preview_ids", []).append(int(mid))
+
+
 async def _preview(msg, uid: int):
     st = _st(uid)
     body, inline_imgs, title = _parse_draft(st.get("draft", ""))
@@ -708,6 +589,9 @@ async def _preview(msg, uid: int):
     if st.get("target") != "broadcast" and not st.get("chat_id"):
         await _choose_channel(msg, uid)
         return
+
+    # Clean slate: every regeneration replaces the old preview entirely.
+    await _wipe_preview(msg, uid)
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
@@ -723,22 +607,27 @@ async def _preview(msg, uid: int):
     md = (f"# {title}\n\n" if title else "") + body
     if images and len(images) > 1 and richsend.enabled():
         try:
-            await richmsg.send_slideshow(msg.chat_id, images, caption=title or "")
+            _keep(uid, await richmsg.send_slideshow(msg.chat_id, images, caption=title or ""))
         except Exception:
             pass
     elif images:
         try:
-            src = images[0]
-            await msg.reply_photo(src, caption=(title or None))
+            sent = await msg.reply_photo(images[0], caption=(title or None))
+            _keep(uid, getattr(sent, "message_id", None))
         except Exception:
             pass
 
     if md.strip():
-        sent = await richsend.reply(msg, md)
-        if not sent:
-            await msg.reply_text(
+        mid = await richsend.deliver(msg.chat_id, md,
+                                     reply_to=getattr(msg, "message_id", None),
+                                     stream=False)
+        if mid:
+            _keep(uid, mid)
+        else:
+            sent = await msg.reply_text(
                 format_ai_answer(md), parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True)
+            _keep(uid, getattr(sent, "message_id", None))
 
     ctrl = await msg.reply_text(
         header + "\n\nPublish this post?\n"
@@ -746,6 +635,8 @@ async def _preview(msg, uid: int):
         "(shorten, translate, add/remove sections…).</i>",
         parse_mode=ParseMode.HTML, reply_markup=kb)
     _track(uid, ctrl)
+    _keep(uid, getattr(ctrl, "message_id", None))
+
 
 
 async def _publish_channel(context, uid: int, chat_id: int) -> str:
@@ -956,21 +847,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _regenerate(msg, uid, text)
         raise ApplicationHandlerStop
 
-    # A channel post link retargets the current draft to that channel.
-    if find_post_link(text):
-        stop, linked = await _apply_link(context, msg, uid, text)
-        if stop:
-            raise ApplicationHandlerStop
-        rest = _POST_LINK_RE.sub("", text).strip()
-        if st.get("draft") and rest:
-            await _regenerate(msg, uid, rest)
-        elif st.get("draft"):
-            await _preview(msg, uid)
-        elif rest or linked:
-            await _generate_and_preview(
-                msg, uid,
-                f"{rest}\n\nSource material:\n{linked}".strip() if linked else rest)
-        raise ApplicationHandlerStop
 
     # Conversational refine: reply to the preview / control message
     if replying_to_bot and st.get("draft"):
@@ -998,13 +874,29 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if caption and not st.get("draft"):
         st["draft"] = caption
         st["mode"] = None
-    await msg.reply_text(
-        f"🖼 Image attached ({len(st['images'])}). "
-        "Send more, or use /post again to preview and publish."
-        if not st.get("draft") else
-        f"🖼 Image attached ({len(st['images'])}). "
-        "Tap ♻️ Regenerate or reply to the preview to keep editing.")
+
+    # One single, silently-updated status line — never one message per photo.
+    note = (
+        f"🖼 <b>{len(st['images'])}</b> image(s) attached"
+        + ("  ·  2+ become a native slider" if len(st["images"]) > 1 else "")
+        + ("\nTap ♻️ Regenerate, or reply to the preview to keep editing."
+           if st.get("draft") else "\nSend the post text, or /post to preview.")
+    )
+    mid = st.get("img_note_id")
+    edited = False
+    if mid:
+        try:
+            await context.bot.edit_message_text(
+                note, chat_id=msg.chat_id, message_id=mid, parse_mode=ParseMode.HTML)
+            edited = True
+        except Exception:
+            edited = False
+    if not edited:
+        sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
+        st["img_note_id"] = getattr(sent, "message_id", None)
+        _track(uid, sent)
     raise ApplicationHandlerStop
+
 
 
 # ------------------------------------------------------------- registration
@@ -1017,7 +909,7 @@ def register(app: Application):
     app.add_handler(CommandHandler("richcast",   cmd_richcast))
     app.add_handler(CommandHandler("addimg",     cmd_addimg))
     app.add_handler(CommandHandler("clearimg",   cmd_clearimg))
-    app.add_handler(CommandHandler("linkpost",   cmd_linkpost))
+    
     app.add_handler(CommandHandler("postformat", cmd_postformat))
     app.add_handler(CommandHandler("cancelpost", cmd_cancelpost))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^cp:"))
