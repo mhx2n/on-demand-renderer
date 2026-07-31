@@ -188,6 +188,7 @@ async def _run_guest(
                 copilot.ask(SYSTEM_PREFIX + prompt, history or []), timeout=60
             )
         except Exception:
+            await richsend.cancel(rich_draft)
             if placeholder:
                 await _safe_edit(placeholder, "⏱ Copilot timed out. Please try again.")
             else:
@@ -210,6 +211,7 @@ async def _run_guest(
                     context,
                     "Copilot is temporarily unavailable. Please try again shortly.",
                 )
+            await richsend.cancel(rich_draft)
             try:
                 await db.log("ERROR", sender.id if sender else 0, "guest", str(e)[:400])
             except Exception:
@@ -222,30 +224,45 @@ async def _run_guest(
                 copilot.ask(SYSTEM_PREFIX + prompt, history or []), timeout=60
             )
         except Exception:
+            await richsend.cancel(rich_draft)
             if placeholder:
                 await _safe_edit(placeholder, "Copilot returned no content.")
             else:
                 await _safe_send(msg, context, "Copilot returned no content.")
             return False
 
-    body = format_ai_answer(final_text)
-    if len(body) <= _MAX_LEN:
+    # Prefer a native Rich Message (tables, LaTeX, task lists, details).
+    rich_mid = await richsend.deliver(
+        chat.id, final_text, reply_to=msg.message_id,
+        draft=rich_draft, stream=False,
+    )
+    if rich_mid:
+        sent_id = rich_mid
         if placeholder:
-            await _safe_edit(placeholder, body)
-            sent_message = placeholder
-        else:
-            sent_message = await _safe_send(msg, context, body)
-    else:
-        if placeholder:
-            await _safe_edit(placeholder, body[:_MAX_LEN])
-            sent_message = placeholder
-        else:
-            sent_message = await _safe_send(msg, context, body[:_MAX_LEN])
-        for i in range(_MAX_LEN, len(body), _MAX_LEN):
             try:
-                await _safe_send(msg, context, body[i:i + _MAX_LEN])
+                await placeholder.delete()
             except Exception:
-                break
+                pass
+    else:
+        body = format_ai_answer(final_text)
+        if len(body) <= _MAX_LEN:
+            if placeholder:
+                await _safe_edit(placeholder, body)
+                sent_message = placeholder
+            else:
+                sent_message = await _safe_send(msg, context, body)
+        else:
+            if placeholder:
+                await _safe_edit(placeholder, body[:_MAX_LEN])
+                sent_message = placeholder
+            else:
+                sent_message = await _safe_send(msg, context, body[:_MAX_LEN])
+            for i in range(_MAX_LEN, len(body), _MAX_LEN):
+                try:
+                    await _safe_send(msg, context, body[i:i + _MAX_LEN])
+                except Exception:
+                    break
+        sent_id = sent_message.message_id if sent_message else None
 
     try:
         if sender:
@@ -254,15 +271,15 @@ async def _run_guest(
         pass
 
     try:
-        if sent_message:
+        if sent_id:
             hist = list(history or [])
             hist.append({"q": prompt, "a": (final_text or "")[:4000]})
             hist = hist[-10:]
             state = json.dumps(hist)
-            new_root = root_id or sent_message.message_id
+            new_root = root_id or sent_id
             await db.save_session(chat.id, new_root, "guest", state)
-            if sent_message.message_id != new_root:
-                await db.save_session(chat.id, sent_message.message_id, "guest", state)
+            if sent_id != new_root:
+                await db.save_session(chat.id, sent_id, "guest", state)
     except Exception:
         pass
 
