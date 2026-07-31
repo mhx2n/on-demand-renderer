@@ -256,7 +256,7 @@ TOOL_CATALOG: dict = {
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
         ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
         ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
-        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\n<code>/channels</code>, <code>/delchannel</code>, <code>/postformat</code>"),
+        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\nReply to any message with <code>/post</code> or <code>/aipost</code> to use it as the source.\n<b>Refine:</b> reply to the preview with what to change (shorten, translate, add/remove) → it is rewritten.\n<b>Images:</b> <code>/addimg &lt;url&gt;</code>, reply to a photo with <code>/addimg</code>, or just send photos — 2+ become a native slider.\n<code>/channels</code>, <code>/delchannel</code>, <code>/clearimg</code>, <code>/postformat</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
@@ -1600,6 +1600,43 @@ async def _run_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     f"Size: {human_size(info['size'])}"
                 )
             except Exception: pass
+            images = info.get("images") or []
+            if images:
+                from telegram import InputMediaPhoto
+
+                await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
+                title = clean_text(info.get("title") or "Photo")
+                uploader = clean_text(info.get("uploader") or "")
+                caption = clean_text(f"{title}\n{uploader}".strip())[:900]
+                sent = False
+                if len(images) > 1 and richsend.enabled():
+                    try:
+                        blobs = [open(p, "rb").read() for p in images[:10]]
+                        sent = bool(await richmsg.send_slideshow(chat_id, blobs, caption=caption))
+                    except Exception:
+                        sent = False
+                if not sent:
+                    try:
+                        if len(images) == 1:
+                            with open(images[0], "rb") as f:
+                                await context.bot.send_photo(chat_id, f, caption=caption)
+                        else:
+                            media = []
+                            for i, p in enumerate(images[:10]):
+                                media.append(InputMediaPhoto(
+                                    open(p, "rb"), caption=caption if i == 0 else None))
+                            await context.bot.send_media_group(chat_id, media)
+                    except Exception:
+                        for p in images[:10]:
+                            try:
+                                with open(p, "rb") as f:
+                                    await context.bot.send_document(chat_id, f)
+                            except Exception:
+                                pass
+                try: await status.delete()
+                except Exception: pass
+                await db.log("INFO", update.effective_user.id, "dl", url[:200])
+                return
             await context.bot.send_chat_action(
                 chat_id,
                 ChatAction.UPLOAD_VOICE if audio_only else ChatAction.UPLOAD_VIDEO,
@@ -1609,6 +1646,7 @@ async def _run_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
             caption = clean_text(f"{title}\n{uploader} • {human_size(info['size'])}")[:900]
             width = info.get("width") or None
             height = info.get("height") or None
+
             with open(info["path"], "rb") as f:
                 if info.get("audio_only"):
                     await context.bot.send_audio(
@@ -2073,7 +2111,8 @@ _RESERVED_CMDS = {
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
     "rich","slide","post","aipost","channels","addchannel","delchannel",
-    "postformat","cancelpost",
+    "postformat","cancelpost","addimg","clearimg","richcast",
+
 }
 
 
@@ -3034,6 +3073,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "delchannel": _channel_post.cmd_delchannel,
             "postformat": _channel_post.cmd_postformat,
             "cancelpost": _channel_post.cmd_cancelpost,
+            "addimg": _channel_post.cmd_addimg,
+            "clearimg": _channel_post.cmd_clearimg,
+            "richcast": _channel_post.cmd_richcast,
+
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
@@ -3112,7 +3155,9 @@ USER_COMMANDS = [
     BotCommand("aipost","AI-written rich channel post"),
     BotCommand("channels","Your registered channels"),
     BotCommand("addchannel","Register a channel for posting"),
+    BotCommand("addimg","Attach image(s) to the current draft"),
     BotCommand("postformat","Rich post formatting cheat-sheet"),
+
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
@@ -3124,6 +3169,8 @@ OWNER_EXTRA = [
     BotCommand("logs",       "Recent logs"),
     BotCommand("users",      "Active user count"),
     BotCommand("announce",   "Broadcast to all users"),
+    BotCommand("richcast",   "Rich broadcast studio (AI + images)"),
+
     BotCommand("setchannel", "Set force-join channel"),
     BotCommand("forcejoin",  "Toggle force-join on/off"),
     BotCommand("ban",        "Ban a user id"),
