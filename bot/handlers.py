@@ -1239,6 +1239,130 @@ def make_provider_handler(key: str):
 
 
 # ============================================================
+# Rich Messages (Bot API 10.1) — demo, status and image slider
+# ============================================================
+_RICH_DEMO = """# Rich Message Demo
+
+Native Telegram rich markdown — tables, LaTeX, task lists, code blocks,
+quotes and collapsible details, all rendered by Telegram itself.
+
+## Table
+
+| Feature   | Status | Priority |
+|:----------|:------:|---------:|
+| Rich text |   ✅   | High     |
+| Streaming |   ✅   | High     |
+| Slider    |   ✅   | Medium   |
+
+## Math
+
+Inline: $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$
+
+$$
+\\int_{0}^{\\infty} e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}
+$$
+
+## Task list
+
+- [x] Rich message layer
+- [x] Live draft streaming
+- [ ] Your next idea
+
+## Code
+
+```python
+print("Hello, rich messages!")
+```
+
+> Rich Messages are for structured replies — reports, AI answers, docs.
+
+---
+Send `/slide <url> <url> …` for a native image slider."""
+
+
+async def cmd_rich(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show rich-message status, or render a demo / your own markdown."""
+    if not await force_join_ok(update, context):
+        return
+    msg = update.effective_message
+    arg = " ".join(context.args or []).strip()
+
+    if arg.lower() in ("", "status"):
+        st = richmsg.status()
+        if not arg:
+            markdown = _RICH_DEMO
+            mid = await richsend.deliver(
+                update.effective_chat.id, markdown,
+                reply_to=msg.message_id, stream=False,
+            )
+            if mid:
+                return
+        await send_md(
+            msg,
+            "<b>Rich Messages (Bot API 10.1)</b>\n"
+            f"• Telethon installed: <code>{st['telethon']}</code>\n"
+            f"• API credentials: <code>{st['configured']}</code>\n"
+            f"• Connected: <code>{st['connected']}</code>\n"
+            f"• Supported by server: <code>{st['rich_supported']}</code>\n\n"
+            "Set <code>TELEGRAM_API_ID</code> and <code>TELEGRAM_API_HASH</code> "
+            "(from my.telegram.org) to enable native tables, LaTeX, task lists, "
+            "collapsible details and live streaming drafts.",
+        )
+        return
+
+    mid = await richsend.deliver(
+        update.effective_chat.id, arg, reply_to=msg.message_id, stream=False,
+    )
+    if not mid:
+        await send_md(msg, format_ai_answer(arg))
+
+
+async def cmd_slide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Native image slider: /slide <url1> <url2> ... (or reply to photos)."""
+    if not await force_join_ok(update, context):
+        return
+    msg = update.effective_message
+    urls = [a for a in (context.args or []) if a.startswith("http")]
+    caption = ""
+    if not urls:
+        await msg.reply_text(
+            "Usage: /slide <image url> <image url> …  (2–10 images)\n"
+            "Example: /slide https://picsum.photos/id/237/800/600 "
+            "https://picsum.photos/id/1015/800/600",
+        )
+        return
+    if not richsend.enabled():
+        # Fallback: classic album so the command always does something useful.
+        try:
+            from telegram import InputMediaPhoto
+            await context.bot.send_media_group(
+                chat_id=update.effective_chat.id,
+                media=[InputMediaPhoto(u) for u in urls[:10]],
+            )
+        except Exception:
+            await msg.reply_text(
+                "Image slider needs rich messages. Ask the owner to set "
+                "TELEGRAM_API_ID / TELEGRAM_API_HASH.",
+            )
+        return
+
+    note = await msg.reply_text("Building slider…")
+    mid = await richmsg.send_slideshow(
+        update.effective_chat.id, urls[:10], caption=caption,
+        reply_to=msg.message_id,
+    )
+    try:
+        await note.delete()
+    except Exception:
+        pass
+    if not mid:
+        await msg.reply_text("Couldn't build the slider. Check the image URLs.")
+
+
+
+
+
+# ============================================================
 # API key inspector
 # ============================================================
 async def cmd_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
