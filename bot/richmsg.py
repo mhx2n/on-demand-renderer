@@ -324,11 +324,12 @@ class Draft:
     async def thinking(self, label: str = "Thinking") -> bool:
         text = f"{label}…"
         if self._html_thinking:
-            if await self.html(f"<tg-thinking>{text}</tg-thinking>\n<p>{text}</p>"):
+            if await self.html(f"<tg-thinking>{text}</tg-thinking>"):
                 return True
             if not self.ok:
                 return False
         return await self.markdown(f"> _{text}_")
+
 
 
     def start_thinking(self, labels: list[str] | None = None, interval: float = 0.9):

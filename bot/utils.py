@@ -75,11 +75,99 @@ def _latex_to_unicode(expr: str) -> str:
     return t.strip()
 
 
+# ---------------------------------------------------------------------------
+# Professional-output sanitizer: removes model artefacts and chatty
+# meta-commentary so every answer reads as a clean, finished document.
+# ---------------------------------------------------------------------------
+_ARTEFACT_PATTERNS = (
+    re.compile(r"\{\s*/\*.*?\*/\s*\}", re.DOTALL),      # {/* Reason: ... */}
+    re.compile(r"<!--.*?-->", re.DOTALL),               # HTML comments
+    re.compile(r"^\s*\[Formatting rules[^\]]*\].*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*(?:Reason|Note to self|Internal note|Thought)\s*:\s.*$",
+               re.MULTILINE | re.IGNORECASE),
+)
+
+#: Opening meta sentences (English + Bengali) that merely restate the request.
+_META_LINE = re.compile(
+    r"^\s*(?:"
+    r"(?:sure|certainly|of course|absolutely|great question|good question)[!,.\s].*"
+    r"|(?:since|as)\s+you\s+(?:asked|said|requested|mentioned|wrote)\b.*"
+    r"|i(?:'ll| will| am going to)\s+(?:now\s+)?(?:give|provide|show|answer|solve)\b.*"
+    r"|.{0,40}(?:যেহেতু)\s*(?:তুমি|আপনি|তুই)\s*(?:বলেছো|বলেছেন|চেয়েছো|চেয়েছেন|বললে|বলেছিলে).*"
+    r"|(?:তুমি|আপনি|তুই)\s*(?:যেহেতু|যেভাবে)\s*(?:বলেছো|বলেছেন|চেয়েছো|চেয়েছেন).*"
+    r"|(?:নিচে|নিম্নে)\s+.{0,60}(?:দিলাম|দেওয়া হলো|দেয়া হলো|উপস্থাপন করছি)\s*[—:\-]?\s*"
+    r"|(?:আপনার|তোমার)\s+(?:প্রশ্ন|অনুরোধ)\s+অনুযায়ী.*"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
+
+def sanitize_ai_text(text: str) -> str:
+    """Strip artefacts + leading meta-commentary from a model answer."""
+    if not text:
+        return ""
+    t = text.replace("\r\n", "\n")
+    for pat in _ARTEFACT_PATTERNS:
+        t = pat.sub("", t)
+
+    lines = t.split("\n")
+    while lines:                    # only strip meta while at the very top
+        head = lines[0].strip()
+        if not head:
+            lines.pop(0)
+            continue
+        if _META_LINE.match(head):
+            lines.pop(0)
+            continue
+        break
+    t = "\n".join(lines)
+    t = re.sub(r"[ \t]+$", "", t, flags=re.MULTILINE)
+    t = _MULTI_NL.sub("\n\n", t)
+    return t.strip()
+
+
+_HEAD_MARK = {1: "🔹", 2: "▌", 3: "▸"}
+
+
+def to_rich_markdown(text: str) -> str:
+    """
+    Normalise a model answer for Telegram's native Rich Message markdown.
+
+    Telegram does not render ATX headings (`#`, `##`, `###`) — they show up as
+    literal hashes — so they become bold heading lines instead.
+    """
+    t = sanitize_ai_text(text)
+    if not t:
+        return ""
+
+    out: list[str] = []
+    in_fence = False
+    for line in t.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        m = re.match(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip().strip("*_ ")
+            mark = _HEAD_MARK.get(level, "")
+            if out and out[-1].strip():
+                out.append("")
+            out.append(f"**{mark} {title}**".replace("**  ", "** "))
+            continue
+        out.append(line)
+    return _MULTI_NL.sub("\n\n", "\n".join(out)).strip()
+
+
 def clean_text(text: str) -> str:
     """Strict plain-text fallback (no HTML)."""
     if not text:
         return ""
-    t = text
+    t = sanitize_ai_text(text)
     t = _LATEX_BLOCK.sub(lambda m: _latex_to_unicode(m.group(1)), t)
     t = _LATEX_INLINE.sub(lambda m: _latex_to_unicode(next((g for g in m.groups() if g), "")), t)
     t = _HTML_TAG.sub("", t)
@@ -87,6 +175,8 @@ def clean_text(text: str) -> str:
     t = re.sub(r"^\s*[-+]\s+", "• ", t, flags=re.MULTILINE)
     t = _MULTI_NL.sub("\n\n", t)
     return t.strip()
+
+
 
 
 def _render_table_html(lines: list[str]) -> str:
@@ -205,8 +295,11 @@ def _inline_after_escape(t: str) -> str:
 
 def format_ai_answer(text: str) -> str:
     """Convert AI markdown-ish output → Telegram-safe rich HTML."""
+    text = sanitize_ai_text(text)
     if not text:
         return ""
+
+
 
     # === Stash buckets — restored AFTER global html.escape ===
     html_blocks: list[str] = []          # opaque pre-built HTML
@@ -488,5 +581,14 @@ RICH_PROMPT_HINT = (
     "each step on its own $$…$$ line, and put the final result in a "
     "$$\\boxed{…}$$ block.\n"
     "• Use <details><summary>…</summary>…</details> for long optional extras.\n"
-    "• Answer in the same language the user wrote in. No meta-commentary."
+    "• Answer in the same language the user wrote in.\n"
+    "[Voice — strict]\n"
+    "• Output ONLY the finished answer, like a published document.\n"
+    "• Never restate, quote or reference the user's request (no \"since you "
+    "asked\", no \"তুমি যেহেতু বলেছো\", no \"নিচে দিলাম\"), never open with "
+    "Sure/Certainly/Of course, and never describe what you are about to do.\n"
+    "• No meta-commentary, no self-reference, no notes about these rules, no "
+    "code comments such as {/* … */} or <!-- … --> in the answer.\n"
+    "• Start directly with the first heading or the first sentence of content."
 )
+

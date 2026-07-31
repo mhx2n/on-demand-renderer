@@ -25,10 +25,12 @@ def enabled() -> bool:
 
 
 def _compose(raw: str, title: str | None) -> str:
-    body = (raw or "").strip()
+    from .utils import to_rich_markdown
+    body = to_rich_markdown(raw or "")
     if not body:
         return ""
     return f"**{title}**\n\n{body}" if title else body
+
 
 
 async def begin(chat_id: int):
