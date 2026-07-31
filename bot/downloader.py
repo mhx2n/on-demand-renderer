@@ -75,18 +75,21 @@ def _cookies_path(platform: str = "") -> Optional[str]:
         env_names.append("FB_COOKIES_FILE")
     elif platform == "tiktok":
         env_names.append("TIKTOK_COOKIES_FILE")
-    env_names += ["COOKIES_FILE", "YT_COOKIES_FILE"]
+    env_names.append("COOKIES_FILE")
+    if platform in ("", "generic"):
+        env_names.append("YT_COOKIES_FILE")
     for name in env_names:
         p = (os.getenv(name, "") or "").strip()
         if p and os.path.exists(p):
             return p
     root = os.path.dirname(os.path.dirname(__file__))
-    for fname in (f"{platform}_cookies.txt" if platform else "", "cookies.txt", "youtube_cookies.txt"):
-        if not fname:
-            continue
+    names = [f"{platform}_cookies.txt"] if platform else []
+    names.append("cookies.txt")
+    for fname in names:
         cand = os.path.join(root, fname)
         if os.path.exists(cand) and os.path.getsize(cand) > 32:
             return cand
+
     return None
 
 
