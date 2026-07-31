@@ -1,21 +1,32 @@
 """
-Rich channel publishing (Bot API 10.1 Rich Messages).
+Rich publishing studio (Bot API 10.1 Rich Messages).
 
-Any user (and the owner) can register a Telegram channel where the bot is an
-administrator, compose a post — by hand or with AI — preview it, and publish
-it as a native Rich Message (headings, tables, LaTeX, task lists, quotes,
-collapsible details, links) plus optional images / native image slider.
+Any user can register a Telegram channel where the bot is an administrator,
+compose a post — by hand, from a replied-to message, or with AI — refine it
+conversationally by *replying* to the preview, attach one or many images
+(native image slider), preview it, and publish it as a native Rich Message.
+
+The owner can aim the very same composer at a broadcast to every bot user.
 
 Commands
     /addchannel @channel        register a channel (bot must be admin there)
     /channels                   list your channels
     /delchannel @channel        unregister
-    /post [markdown]            compose & publish (buttons + preview)
-    /aipost <topic>             let AI write the post, then preview & publish
+    /post [markdown]            compose & publish (also works as a reply)
+    /aipost <topic>             let AI write the post (also works as a reply)
+    /addimg <url…>              attach image(s) to the current draft
+    /clearimg                   drop attached images
+    /richcast [topic]           owner-only: same studio, broadcast to all users
     /postformat                 cheat-sheet of the supported rich markup
+    /cancelpost                 abort
+
+Refining
+    Reply to the preview (or to the control message) with plain instructions —
+    "make it shorter", "বাংলায় লেখো", "add a pricing table", "remove the quote"
+    — and the post is regenerated, then previewed again.
 
 Draft extras (any line):
-    !img <url>          attach an image  (2+ → native slider / album)
+    !img <url>          attach an image  (2+ → native slider)
     !title <text>       bold H1 title placed on top
 """
 from __future__ import annotations
@@ -41,8 +52,10 @@ from .utils import clean_text, format_ai_answer
 
 log = logging.getLogger("channel_post")
 
-# user_id -> {"mode": ..., "chat_id": int|None, "draft": str, "images": [url]}
+# user_id -> state dict
 _STATE: dict[int, dict] = {}
+
+MAX_IMAGES = 10
 
 FORMAT_HELP = """# Rich post format
 
@@ -71,6 +84,10 @@ print("code block")
 **Link:** `[Telegram](https://telegram.org)`
 **Image:** `!img https://example.com/pic.jpg`  (2+ → native slider)
 **Title:** `!title My update`
+
+## Refine
+Reply to the preview with what you want changed — add, remove, shorten,
+translate — and I rewrite the post, then show a new preview.
 """
 
 _AI_PROMPT = (
@@ -82,10 +99,41 @@ _AI_PROMPT = (
     "explanations about yourself. Reply with the post only.\n\nTopic: "
 )
 
+_REFINE_PROMPT = (
+    "You are editing a Telegram Rich Message post. Apply the user's instruction "
+    "to the post below and return the COMPLETE rewritten post only — same rich "
+    "markdown style (headings, tables, task lists, quotes, code, LaTeX), no HTML, "
+    "no commentary, no explanation of the change. If the instruction asks for a "
+    "different language, translate the whole post into that language.\n\n"
+    "--- CURRENT POST ---\n{post}\n--- END POST ---\n\nInstruction: {instruction}"
+)
+
 
 # --------------------------------------------------------------- utilities
 def _esc(s: str) -> str:
     return html.escape(s or "")
+
+
+def _st(uid: int) -> dict:
+    st = _STATE.get(uid)
+    if st is None:
+        st = {"mode": None, "target": None, "chat_id": None, "draft": "",
+              "images": [], "ctrl_ids": set(), "busy": False}
+        _STATE[uid] = st
+    st.setdefault("images", [])
+    st.setdefault("ctrl_ids", set())
+    return st
+
+
+def _track(uid: int, message) -> None:
+    """Remember a bot message the user may reply to in order to refine."""
+    if message is None:
+        return
+    st = _st(uid)
+    ids: set = st["ctrl_ids"]
+    ids.add(getattr(message, "message_id", 0))
+    if len(ids) > 20:
+        st["ctrl_ids"] = set(sorted(ids)[-20:])
 
 
 def _parse_draft(text: str) -> tuple[str, list[str], str | None]:
@@ -106,25 +154,42 @@ def _parse_draft(text: str) -> tuple[str, list[str], str | None]:
     return "\n".join(body).strip(), images, title
 
 
-async def _ai_write(topic: str) -> str | None:
+def _all_images(uid: int, inline: list[str]) -> list:
+    """Inline !img urls + explicitly attached images (urls or raw bytes)."""
+    out: list = list(inline)
+    for item in _st(uid)["images"]:
+        if item not in out:
+            out.append(item)
+    return out[:MAX_IMAGES]
+
+
+async def _ai(prompt: str) -> str | None:
     for key in ("g", "pr", "co"):
         meta = REGISTRY.get(key)
         if not meta:
             continue
         try:
-            out = await asyncio.wait_for(meta[1](_AI_PROMPT + topic, []), timeout=120)
+            out = await asyncio.wait_for(meta[1](prompt, []), timeout=120)
             if (out or "").strip():
                 return out.strip()
         except Exception:
             continue
     for _, (_, fn) in REGISTRY.items():
         try:
-            out = await asyncio.wait_for(fn(_AI_PROMPT + topic, []), timeout=120)
+            out = await asyncio.wait_for(fn(prompt, []), timeout=120)
             if (out or "").strip():
                 return out.strip()
         except Exception:
             continue
     return None
+
+
+async def _ai_write(topic: str) -> str | None:
+    return await _ai(_AI_PROMPT + topic)
+
+
+async def _ai_refine(post: str, instruction: str) -> str | None:
+    return await _ai(_REFINE_PROMPT.format(post=post, instruction=instruction))
 
 
 async def _resolve_channel(context, ref: str):
@@ -164,6 +229,24 @@ async def _channels_kb(uid: int, action: str):
         rows.append([InlineKeyboardButton(label[:40], callback_data=f"cp:{action}:{chat_id}")])
     rows.append([InlineKeyboardButton("Cancel", callback_data="cp:cancel:0")])
     return InlineKeyboardMarkup(rows)
+
+
+async def _photo_bytes(context, message) -> bytes | None:
+    """Download the largest photo / image document of a message."""
+    try:
+        file_id = None
+        if getattr(message, "photo", None):
+            file_id = message.photo[-1].file_id
+        elif getattr(message, "document", None) and \
+                (message.document.mime_type or "").startswith("image/"):
+            file_id = message.document.file_id
+        if not file_id:
+            return None
+        f = await context.bot.get_file(file_id)
+        return bytes(await f.download_as_bytearray())
+    except Exception as e:
+        log.debug("photo fetch failed: %s", e)
+        return None
 
 
 # ---------------------------------------------------------------- commands
@@ -231,27 +314,45 @@ async def cmd_postformat(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          disable_web_page_preview=True)
 
 
+def _replied_text(msg) -> str:
+    rep = getattr(msg, "reply_to_message", None)
+    if not rep:
+        return ""
+    return (rep.text or rep.caption or "").strip()
+
+
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     uid = update.effective_user.id
-    rows = await db.list_channels(uid)
-    if not rows:
+    if not await db.list_channels(uid):
         await msg.reply_text(
             "First register a channel: /addchannel @yourchannel\n"
             "See /postformat for the supported rich markup.")
         return
-    draft = (msg.text or "").split(None, 1)
-    draft = draft[1].strip() if len(draft) > 1 else ""
-    st = _STATE.setdefault(uid, {})
-    st.update({"draft": draft, "chat_id": None, "mode": None})
-
+    parts = (msg.text or "").split(None, 1)
+    draft = parts[1].strip() if len(parts) > 1 else ""
     if not draft:
+        draft = _replied_text(msg)
+
+    st = _st(uid)
+    st.update({"draft": draft, "chat_id": None, "mode": None,
+               "target": "channel", "images": [], "ctrl_ids": set()})
+
+    rep = getattr(msg, "reply_to_message", None)
+    if rep is not None:
+        b = await _photo_bytes(context, rep)
+        if b:
+            st["images"].append(b)
+
+    if not draft and not st["images"]:
         st["mode"] = "await_text"
-        await msg.reply_text(
+        sent = await msg.reply_text(
             "Send me the post content now (rich markdown).\n"
             "Extras: <code>!img &lt;url&gt;</code>, <code>!title &lt;text&gt;</code>\n"
+            "You can also send photos to attach them.\n"
             "Cheat-sheet: /postformat · /cancelpost to abort.",
             parse_mode=ParseMode.HTML)
+        _track(uid, sent)
         return
     await _choose_channel(msg, uid)
 
@@ -263,11 +364,99 @@ async def cmd_aipost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("First register a channel: /addchannel @yourchannel")
         return
     topic = " ".join(context.args or []).strip()
+    source = _replied_text(msg)
+    st = _st(uid)
+    st.update({"target": "channel", "chat_id": None, "draft": "",
+               "images": [], "ctrl_ids": set(), "mode": None})
+
+    rep = getattr(msg, "reply_to_message", None)
+    if rep is not None:
+        b = await _photo_bytes(context, rep)
+        if b:
+            st["images"].append(b)
+
+    if source:
+        topic = (f"{topic}\n\nSource material:\n{source}" if topic
+                 else f"Turn this into a polished channel post:\n\n{source}")
     if not topic:
-        _STATE.setdefault(uid, {}).update({"mode": "await_topic", "draft": "", "chat_id": None})
-        await msg.reply_text("What should the post be about? Send the topic now.")
+        st["mode"] = "await_topic"
+        sent = await msg.reply_text("What should the post be about? Send the topic now.")
+        _track(uid, sent)
         return
     await _generate_and_preview(msg, uid, topic)
+
+
+async def cmd_richcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: compose a rich post and broadcast it to every bot user."""
+    msg = update.effective_message
+    uid = update.effective_user.id
+    if uid != OWNER_ID:
+        await msg.reply_text("Owner only.")
+        return
+    arg = " ".join(context.args or []).strip()
+    source = _replied_text(msg)
+    st = _st(uid)
+    st.update({"target": "broadcast", "chat_id": None, "draft": "",
+               "images": [], "ctrl_ids": set(), "mode": None})
+
+    rep = getattr(msg, "reply_to_message", None)
+    if rep is not None:
+        b = await _photo_bytes(context, rep)
+        if b:
+            st["images"].append(b)
+
+    ai = arg.lower().startswith("ai ")
+    if ai:
+        arg = arg[3:].strip()
+    if source and not arg:
+        st["draft"] = source
+        await _preview(msg, uid)
+        return
+    if ai or (source and arg):
+        topic = arg
+        if source:
+            topic = f"{arg}\n\nSource material:\n{source}"
+        await _generate_and_preview(msg, uid, topic)
+        return
+    if arg:
+        st["draft"] = arg
+        await _preview(msg, uid)
+        return
+    st["mode"] = "await_text"
+    sent = await msg.reply_text(
+        "Send the broadcast content now (rich markdown).\n"
+        "Extras: <code>!img &lt;url&gt;</code>, <code>!title &lt;text&gt;</code>, photos.\n"
+        "Tip: <code>/richcast ai &lt;topic&gt;</code> lets AI write it.\n"
+        "/cancelpost to abort.",
+        parse_mode=ParseMode.HTML)
+    _track(uid, sent)
+
+
+async def cmd_addimg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    uid = update.effective_user.id
+    st = _st(uid)
+    urls = [a for a in (context.args or []) if a.startswith("http")]
+    rep = getattr(msg, "reply_to_message", None)
+    if rep is not None:
+        b = await _photo_bytes(context, rep)
+        if b:
+            st["images"].append(b)
+    for u in urls:
+        if u not in st["images"]:
+            st["images"].append(u)
+    st["images"] = st["images"][:MAX_IMAGES]
+    if not st["images"]:
+        await msg.reply_text("Send /addimg <url> or reply to a photo with /addimg.")
+        return
+    await msg.reply_text(
+        f"🖼 {len(st['images'])} image(s) attached. "
+        "They will be posted as a native slider when 2 or more.")
+
+
+async def cmd_clearimg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _st(update.effective_user.id)["images"] = []
+    await update.effective_message.reply_text("Images cleared.")
 
 
 async def cmd_cancelpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,51 +475,112 @@ async def _generate_and_preview(msg, uid: int, topic: str):
     if not text:
         await msg.reply_text("No AI provider is available right now.")
         return
-    _STATE.setdefault(uid, {}).update({"draft": text, "mode": None})
+    st = _st(uid)
+    st.update({"draft": text, "mode": None})
+    if st.get("target") == "broadcast":
+        await _preview(msg, uid)
+        return
     await _choose_channel(msg, uid)
+
+
+async def _regenerate(msg, uid: int, instruction: str):
+    st = _st(uid)
+    if st.get("busy"):
+        return
+    st["busy"] = True
+    note = await msg.reply_text("Rewriting…")
+    try:
+        body, inline_imgs, title = _parse_draft(st.get("draft", ""))
+        current = (f"# {title}\n\n" if title else "") + body
+        out = await _ai_refine(current, instruction)
+    finally:
+        st["busy"] = False
+    try:
+        await note.delete()
+    except Exception:
+        pass
+    if not out:
+        await msg.reply_text("Could not rewrite the post — no AI provider answered.")
+        return
+    if inline_imgs:
+        out = out + "\n" + "\n".join(f"!img {u}" for u in inline_imgs)
+    st["draft"] = out
+    await _preview(msg, uid)
 
 
 async def _choose_channel(msg, uid: int):
     rows = await db.list_channels(uid)
     if len(rows) == 1:
-        _STATE.setdefault(uid, {})["chat_id"] = rows[0][0]
+        _st(uid)["chat_id"] = rows[0][0]
         await _preview(msg, uid)
         return
-    await msg.reply_text("Which channel?", reply_markup=await _channels_kb(uid, "ch"))
+    sent = await msg.reply_text("Which channel?", reply_markup=await _channels_kb(uid, "ch"))
+    _track(uid, sent)
+
+
+async def _target_name(uid: int) -> str:
+    st = _st(uid)
+    if st.get("target") == "broadcast":
+        return "All bot users (broadcast)"
+    ch = await db.get_channel(st.get("chat_id"))
+    return ch[2] if ch and ch[2] else str(st.get("chat_id"))
 
 
 async def _preview(msg, uid: int):
-    st = _STATE.get(uid) or {}
-    body, images, title = _parse_draft(st.get("draft", ""))
-    st["images"] = images
+    st = _st(uid)
+    body, inline_imgs, title = _parse_draft(st.get("draft", ""))
+    images = _all_images(uid, inline_imgs)
     st["title"] = title
     if not body and not images:
         await msg.reply_text("The draft is empty.")
         return
-    ch = await db.get_channel(st.get("chat_id"))
-    name = (ch[2] if ch and ch[2] else str(st.get("chat_id")))
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
-        InlineKeyboardButton("✖ Cancel", callback_data="cp:cancel:0"),
-    ]])
+    if st.get("target") != "broadcast" and not st.get("chat_id"):
+        await _choose_channel(msg, uid)
+        return
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
+         InlineKeyboardButton("♻️ Regenerate", callback_data="cp:regen:1")],
+        [InlineKeyboardButton("🗑 Clear images", callback_data="cp:noimg:1"),
+         InlineKeyboardButton("✖ Cancel", callback_data="cp:cancel:0")],
+    ])
+    name = await _target_name(uid)
     header = f"<b>Preview → {_esc(name)}</b>"
     if images:
         header += f"  ·  {len(images)} image(s)"
-    sent = await richsend.reply(msg, (f"# {title}\n\n" if title else "") + body)
-    if not sent:
-        await msg.reply_text(
-            f"{header}\n\n{format_ai_answer(body)}",
-            parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    await msg.reply_text(header + "\n\nPublish this post?", parse_mode=ParseMode.HTML,
-                         reply_markup=kb)
+
+    md = (f"# {title}\n\n" if title else "") + body
+    if images and len(images) > 1 and richsend.enabled():
+        try:
+            await richmsg.send_slideshow(msg.chat_id, images, caption=title or "")
+        except Exception:
+            pass
+    elif images:
+        try:
+            src = images[0]
+            await msg.reply_photo(src, caption=(title or None))
+        except Exception:
+            pass
+
+    if md.strip():
+        sent = await richsend.reply(msg, md)
+        if not sent:
+            await msg.reply_text(
+                format_ai_answer(md), parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True)
+
+    ctrl = await msg.reply_text(
+        header + "\n\nPublish this post?\n"
+        "<i>Reply to this message with instructions to rewrite it "
+        "(shorten, translate, add/remove sections…).</i>",
+        parse_mode=ParseMode.HTML, reply_markup=kb)
+    _track(uid, ctrl)
 
 
-async def _publish(context, uid: int) -> str:
-    st = _STATE.get(uid) or {}
-    chat_id = st.get("chat_id")
-    body, images, title = _parse_draft(st.get("draft", ""))
-    if not chat_id:
-        return "No channel selected."
+async def _publish_channel(context, uid: int, chat_id: int) -> str:
+    st = _st(uid)
+    body, inline_imgs, title = _parse_draft(st.get("draft", ""))
+    images = _all_images(uid, inline_imgs)
     if not await _bot_is_admin(context, chat_id):
         return "I'm no longer an administrator in that channel."
 
@@ -339,15 +589,18 @@ async def _publish(context, uid: int) -> str:
 
     if images:
         if len(images) > 1 and richsend.enabled():
-            mid = await richmsg.send_slideshow(chat_id, images[:10], caption=title or "")
-            posted = bool(mid)
+            try:
+                posted = bool(await richmsg.send_slideshow(
+                    chat_id, images, caption=title or ""))
+            except Exception:
+                posted = False
         if not posted:
             try:
                 if len(images) == 1:
-                    await context.bot.send_photo(chat_id, images[0], caption=title or "")
+                    await context.bot.send_photo(chat_id, images[0], caption=title or None)
                 else:
                     await context.bot.send_media_group(
-                        chat_id, [InputMediaPhoto(u) for u in images[:10]])
+                        chat_id, [InputMediaPhoto(u) for u in images])
                 posted = True
             except Exception as e:
                 log.debug("channel images failed: %s", e)
@@ -355,17 +608,69 @@ async def _publish(context, uid: int) -> str:
     if md.strip():
         mid = await richsend.post(chat_id, md)
         if not mid:
-            text = format_ai_answer(md)
             try:
                 await context.bot.send_message(
-                    chat_id, text[:4000], parse_mode=ParseMode.HTML,
+                    chat_id, format_ai_answer(md)[:4000], parse_mode=ParseMode.HTML,
                     disable_web_page_preview=False)
             except Exception:
                 await context.bot.send_message(chat_id, clean_text(md)[:4000])
         posted = True
 
-    _STATE.pop(uid, None)
     return "✅ Published." if posted else "Nothing was posted."
+
+
+async def _broadcast(context, uid: int, status_msg) -> str:
+    st = _st(uid)
+    body, inline_imgs, title = _parse_draft(st.get("draft", ""))
+    images = _all_images(uid, inline_imgs)
+    md = (f"# {title}\n\n" if title else "") + body
+    html_fallback = format_ai_answer(md)[:4000] if md.strip() else ""
+
+    ids = await db.all_user_ids()
+    total, ok, blocked, fail = len(ids), 0, 0, 0
+    for i, target in enumerate(ids, 1):
+        delivered = False
+        try:
+            if images:
+                sent = False
+                if len(images) > 1 and richsend.enabled():
+                    try:
+                        sent = bool(await richmsg.send_slideshow(
+                            target, images, caption=title or ""))
+                    except Exception:
+                        sent = False
+                if not sent:
+                    if len(images) == 1:
+                        await context.bot.send_photo(target, images[0],
+                                                     caption=title or None)
+                    else:
+                        await context.bot.send_media_group(
+                            target, [InputMediaPhoto(u) for u in images])
+                delivered = True
+            if md.strip():
+                mid = await richsend.post(target, md)
+                if not mid:
+                    await context.bot.send_message(
+                        target, html_fallback, parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True)
+                delivered = True
+            ok += 1 if delivered else 0
+        except Exception as e:
+            es = str(e).lower()
+            if "blocked" in es or "deactivated" in es or "chat not found" in es:
+                blocked += 1
+            else:
+                fail += 1
+        if i % 25 == 0:
+            await asyncio.sleep(1.0)
+            try:
+                await status_msg.edit_text(
+                    f"Progress {i}/{total}\nDelivered: {ok}\n"
+                    f"Blocked: {blocked}\nFailed: {fail}")
+            except Exception:
+                pass
+    return (f"<b>Rich broadcast complete</b>\nTotal: {total}\nDelivered: {ok}\n"
+            f"Blocked/deleted: {blocked}\nFailed: {fail}")
 
 
 # ---------------------------------------------------------------- callbacks
@@ -383,16 +688,56 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+
     if action == "ch":
-        _STATE.setdefault(uid, {})["chat_id"] = int(arg)
+        _st(uid)["chat_id"] = int(arg)
         try:
             await q.edit_message_text("Channel selected.")
         except Exception:
             pass
         await _preview(q.message, uid)
         return
+
+    if action == "noimg":
+        _st(uid)["images"] = []
+        try:
+            await q.edit_message_text("Attached images cleared. Send /post again to re-preview.")
+        except Exception:
+            pass
+        return
+
+    if action == "regen":
+        st = _st(uid)
+        st["mode"] = "await_instruction"
+        sent = await q.message.reply_text(
+            "What should I change? Send the instruction "
+            "(e.g. “shorter”, “বাংলায় লেখো”, “add a comparison table”).")
+        _track(uid, sent)
+        return
+
     if action == "go":
-        result = await _publish(context, uid)
+        st = _st(uid)
+        if st.get("target") == "broadcast":
+            if uid != OWNER_ID:
+                await q.message.reply_text("Owner only.")
+                return
+            try:
+                await q.edit_message_text("Broadcasting…")
+            except Exception:
+                pass
+            result = await _broadcast(context, uid, q.message)
+            _STATE.pop(uid, None)
+            try:
+                await q.message.reply_text(result, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+            return
+        chat_id = st.get("chat_id")
+        if not chat_id:
+            await q.message.reply_text("No channel selected.")
+            return
+        result = await _publish_channel(context, uid, chat_id)
+        _STATE.pop(uid, None)
         try:
             await q.edit_message_text(result)
         except Exception:
@@ -406,18 +751,71 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     uid = update.effective_user.id
     st = _STATE.get(uid)
-    if not st or not st.get("mode"):
+    if not st:
         return
     text = (msg.text or msg.caption or "").strip()
-    if not text:
+    if not text or text.startswith("/"):
         return
-    mode = st["mode"]
-    st["mode"] = None
+
+    mode = st.get("mode")
+    rep = getattr(msg, "reply_to_message", None)
+    replying_to_bot = bool(
+        rep is not None
+        and getattr(rep, "from_user", None) is not None
+        and rep.from_user.is_bot
+        and (rep.message_id in st.get("ctrl_ids", set()) or st.get("draft"))
+    )
+
     if mode == "await_text":
+        st["mode"] = None
         st["draft"] = text
-        await _choose_channel(msg, uid)
-    elif mode == "await_topic":
+        if st.get("target") == "broadcast":
+            await _preview(msg, uid)
+        else:
+            await _choose_channel(msg, uid)
+        raise ApplicationHandlerStop
+
+    if mode == "await_topic":
+        st["mode"] = None
         await _generate_and_preview(msg, uid, text)
+        raise ApplicationHandlerStop
+
+    if mode == "await_instruction":
+        st["mode"] = None
+        await _regenerate(msg, uid, text)
+        raise ApplicationHandlerStop
+
+    # Conversational refine: reply to the preview / control message
+    if replying_to_bot and st.get("draft"):
+        await _regenerate(msg, uid, text)
+        raise ApplicationHandlerStop
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Attach photos sent (or replied) while the composer is armed."""
+    msg = update.effective_message
+    if not msg or not update.effective_user:
+        return
+    uid = update.effective_user.id
+    st = _STATE.get(uid)
+    if not st:
+        return
+    if not (st.get("mode") or st.get("draft")):
+        return
+    data = await _photo_bytes(context, msg)
+    if not data:
+        return
+    st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [data]
+    caption = (msg.caption or "").strip()
+    if caption and not st.get("draft"):
+        st["draft"] = caption
+        st["mode"] = None
+    await msg.reply_text(
+        f"🖼 Image attached ({len(st['images'])}). "
+        "Send more, or use /post again to preview and publish."
+        if not st.get("draft") else
+        f"🖼 Image attached ({len(st['images'])}). "
+        "Tap ♻️ Regenerate or reply to the preview to keep editing.")
     raise ApplicationHandlerStop
 
 
@@ -428,12 +826,19 @@ def register(app: Application):
     app.add_handler(CommandHandler("delchannel", cmd_delchannel))
     app.add_handler(CommandHandler("post",       cmd_post))
     app.add_handler(CommandHandler("aipost",     cmd_aipost))
+    app.add_handler(CommandHandler("richcast",   cmd_richcast))
+    app.add_handler(CommandHandler("addimg",     cmd_addimg))
+    app.add_handler(CommandHandler("clearimg",   cmd_clearimg))
     app.add_handler(CommandHandler("postformat", cmd_postformat))
     app.add_handler(CommandHandler("cancelpost", cmd_cancelpost))
     app.add_handler(CallbackQueryHandler(on_callback, pattern=r"^cp:"))
-    # Runs before every other text handler, but only consumes the update
+    # Run before every other text/photo handler, but only consume the update
     # while the composer is armed for this user.
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_text),
+        group=-4,
+    )
+    app.add_handler(
+        MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo),
         group=-4,
     )
