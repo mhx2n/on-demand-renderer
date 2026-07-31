@@ -1191,10 +1191,12 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await db.log("INFO", update.effective_user.id, provider_key, prompt[:200])
 
     except asyncio.TimeoutError:
+        await richsend.cancel(rich_draft)
         msg = f"{name} timed out. Please retry."
         if placeholder: await safe_edit(placeholder, msg)
         else: await update.effective_message.reply_text(msg)
         await db.log("ERROR", update.effective_user.id, provider_key, "timeout")
+
     except Exception as e:
         tb = traceback.format_exc(limit=2)
         err_text = str(e)
