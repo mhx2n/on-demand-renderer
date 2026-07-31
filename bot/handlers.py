@@ -1142,8 +1142,15 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
     history = _HISTORY.get(history_key, []) if history_key else []
 
     live = (await db.get_setting("live_response", "on")) == "on"
+    chat_id = update.effective_chat.id
+    is_private = update.effective_chat.type == "private"
+
+    # Bot API 10.1 Rich Messages: in private chats we stream a live rich
+    # draft while the provider thinks, then send the final rich message.
+    rich_draft = await richsend.begin(chat_id) if (live and is_private) else None
+
     placeholder = None
-    if live:
+    if live and rich_draft is None:
         placeholder = await update.effective_message.reply_text(f"{name} is thinking...")
 
     try:
@@ -1152,22 +1159,37 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # Clear any prior exhausted flag on success.
         try: await _mark_provider_exhausted(provider_key, False)
         except Exception: pass
-        body = f"<b>{escape_html(name)}</b>\n\n{answer_fmt}"
-        if placeholder:
-            await stream_edit(placeholder, body)
-            sent = placeholder
-        else:
-            sent = await send_md(update.effective_message, body)
 
-        new_root = root_id or sent.message_id
+        rich_mid = await richsend.deliver(
+            chat_id, answer, title=name,
+            reply_to=update.effective_message.message_id,
+            draft=rich_draft, stream=live,
+        )
+
+        if rich_mid:
+            sent_id = rich_mid
+            if placeholder:
+                try: await placeholder.delete()
+                except Exception: pass
+        else:
+            body = f"<b>{escape_html(name)}</b>\n\n{answer_fmt}"
+            if placeholder:
+                await stream_edit(placeholder, body)
+                sent_id = placeholder.message_id
+            else:
+                sent = await send_md(update.effective_message, body)
+                sent_id = sent.message_id
+
+        new_root = root_id or sent_id
         hist = _HISTORY[(update.effective_chat.id, new_root)]
         hist.append({"q": prompt, "a": (answer or "")[:4000]})
         _HISTORY[(update.effective_chat.id, new_root)] = hist[-10:]
         state = json.dumps(_HISTORY[(update.effective_chat.id, new_root)])
         await db.save_session(update.effective_chat.id, new_root, provider_key, state)
-        if sent.message_id != new_root:
-            await db.save_session(update.effective_chat.id, sent.message_id, provider_key, state)
+        if sent_id != new_root:
+            await db.save_session(update.effective_chat.id, sent_id, provider_key, state)
         await db.log("INFO", update.effective_user.id, provider_key, prompt[:200])
+
     except asyncio.TimeoutError:
         msg = f"{name} timed out. Please retry."
         if placeholder: await safe_edit(placeholder, msg)
