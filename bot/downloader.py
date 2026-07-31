@@ -242,6 +242,23 @@ def _looks_like_html(path: str) -> bool:
     ))
 
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".gif"}
+
+
+def _is_image(path: str) -> bool:
+    if os.path.splitext(path or "")[1].lower() in _IMAGE_EXTS:
+        return True
+    try:
+        with open(path, "rb") as f:
+            head = f.read(12)
+    except Exception:
+        return False
+    return (head.startswith(b"\xff\xd8\xff")            # jpeg
+            or head.startswith(b"\x89PNG")              # png
+            or head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+
+
+
 def _probe_media(path: str) -> dict:
     proc = subprocess.run(
         [
