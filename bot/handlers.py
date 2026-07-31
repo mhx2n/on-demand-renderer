@@ -3020,7 +3020,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ping": cmd_ping, "key": cmd_key, "tryke": cmd_tryke, "dl": cmd_dl,
             "top": cmd_top,
             "info": cmd_info, "m2t": cmd_m2t, "time": cmd_time, "vnote": cmd_vnote,
-            "convert": cmd_convert,
+            "convert": cmd_convert, "rich": cmd_rich, "slide": cmd_slide,
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
@@ -3093,6 +3093,8 @@ USER_COMMANDS = [
     BotCommand("time",  "World time + calendar (e.g. /time bd)"),
     BotCommand("vnote", "Reply to video → circular note"),
     BotCommand("convert","Universal converter (bin/hex/units/…)"),
+    BotCommand("rich",  "Rich message demo / status"),
+    BotCommand("slide", "Native image slider from URLs"),
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
@@ -3379,6 +3381,8 @@ def register_handlers(app: Application):
     app.add_handler(CommandHandler("time",  cmd_time))
     app.add_handler(CommandHandler("vnote", cmd_vnote))
     app.add_handler(CommandHandler("convert", cmd_convert))
+    app.add_handler(CommandHandler("rich",  cmd_rich))
+    app.add_handler(CommandHandler("slide", cmd_slide))
 
     for k in list(REGISTRY.keys()):
         app.add_handler(CommandHandler(k, make_provider_handler(k)))
