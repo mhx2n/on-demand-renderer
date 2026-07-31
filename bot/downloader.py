@@ -916,37 +916,34 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
             if "max-filesize" in msg or "file is larger" in msg \
                or "requested format is not available" in msg:
                 continue
-            if platform in {"facebook", "instagram"} and (
-                "cannot parse data" in msg
-                or "no video formats found" in msg
-                or "requested format is not available" in msg
-            ):
-                raise RuntimeError(
-                    f"[{platform}] {platform.title()} blocked or hid the reel/video stream for this server. "
-                    "Open the link once in a browser and resend the final public reel URL. "
-                    f"If it still fails, the owner must provide fresh {platform.title()} cookies to yt-dlp."
-                )
-            # bot-check / auth → no point hammering further tiers
-            if "sign in to confirm" in msg or "login required" in msg \
-               or "private" in msg or "age" in msg:
-                raise
+            # blocked / auth walls → stop hammering tiers, go straight to fallbacks
+            if any(t in msg for t in (
+                "cannot parse data", "no video formats found", "sign in to confirm",
+                "login required", "private", "rate-limit", "age",
+            )):
+                break
             continue
         except Exception as e:
             last_err = e
             raw_errors.append(str(e)[:500])
             continue
 
-    # TikTok: last-ditch fallback to tikwm if yt-dlp failed completely.
+    # Platform-specific last-ditch fallbacks once yt-dlp gave up.
     if platform == "tiktok":
         tik = _tikwm_download(url, workdir, audio_only)
         if tik:
             return tik
 
-    # Instagram: try embed/mirror fallback if yt-dlp failed.
     if platform == "instagram":
         ig = _ig_fallback_download(url, workdir, audio_only)
         if ig:
             return ig
+
+    if platform == "facebook":
+        fb = _fb_fallback_download(url, workdir, audio_only)
+        if fb:
+            return fb
+
 
     # Final universal fallback: let yt-dlp choose whatever single best stream exists,
     # then normalize it for Telegram with ffmpeg.
