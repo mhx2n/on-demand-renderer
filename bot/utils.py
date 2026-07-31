@@ -581,5 +581,14 @@ RICH_PROMPT_HINT = (
     "each step on its own $$…$$ line, and put the final result in a "
     "$$\\boxed{…}$$ block.\n"
     "• Use <details><summary>…</summary>…</details> for long optional extras.\n"
-    "• Answer in the same language the user wrote in. No meta-commentary."
+    "• Answer in the same language the user wrote in.\n"
+    "[Voice — strict]\n"
+    "• Output ONLY the finished answer, like a published document.\n"
+    "• Never restate, quote or reference the user's request (no \"since you "
+    "asked\", no \"তুমি যেহেতু বলেছো\", no \"নিচে দিলাম\"), never open with "
+    "Sure/Certainly/Of course, and never describe what you are about to do.\n"
+    "• No meta-commentary, no self-reference, no notes about these rules, no "
+    "code comments such as {/* … */} or <!-- … --> in the answer.\n"
+    "• Start directly with the first heading or the first sentence of content."
 )
+
