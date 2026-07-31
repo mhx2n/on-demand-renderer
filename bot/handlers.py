@@ -1602,6 +1602,8 @@ async def _run_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception: pass
             images = info.get("images") or []
             if images:
+                from telegram import InputMediaPhoto
+
                 await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
                 title = clean_text(info.get("title") or "Photo")
                 uploader = clean_text(info.get("uploader") or "")
