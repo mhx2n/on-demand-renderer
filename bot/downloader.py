@@ -1001,11 +1001,19 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
 
 async def download(url: str, progress: Optional[Callable] = None,
                    audio_only: bool = False) -> dict:
-    """Download a video or audio. Returns dict with path/size/title or raises."""
+    """Download a video, audio or image post. Returns an info dict or raises."""
     workdir = tempfile.mkdtemp(prefix="dl_")
     try:
         info = await asyncio.to_thread(_sync_download, url, workdir, progress, audio_only)
-        if info["size"] > MAX_BYTES:
+        images = info.get("images") or []
+        if images:
+            # keep only images that fit Telegram's photo limit
+            kept = [p for p in images if os.path.exists(p) and 0 < os.path.getsize(p) <= MAX_BYTES]
+            if not kept:
+                raise RuntimeError("No usable images found.")
+            info["images"] = kept
+            info["size"] = sum(os.path.getsize(p) for p in kept)
+        elif (info.get("size") or 0) > MAX_BYTES:
             try: os.remove(info["path"])
             except Exception: pass
             raise RuntimeError(
@@ -1017,6 +1025,7 @@ async def download(url: str, progress: Optional[Callable] = None,
     except Exception:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
+
 
 
 def user_error_text(err: Exception) -> str:
