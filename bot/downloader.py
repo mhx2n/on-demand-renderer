@@ -468,62 +468,87 @@ def _pick_best_size(info: dict) -> int:
 
 def _tikwm_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
     """Reliable TikTok fallback via the public tikwm.com endpoint.
+
+    Handles video, music-only, and photo ("slideshow") posts.
     Returns info dict on success, None on failure.
     """
-    try:
-        r = requests.post(
-            "https://www.tikwm.com/api/",
-            data={"url": url, "hd": "1"},
-            headers={"User-Agent": _UA_DESKTOP},
-            timeout=25,
-        )
-        j = r.json()
-        if r.status_code != 200 or j.get("code") != 0:
-            return None
-        d = j.get("data") or {}
-        if audio_only:
-            media = d.get("music")
-            ext = "mp3"
-        else:
-            media = d.get("hdplay") or d.get("play") or d.get("wmplay")
-            ext = "mp4"
-        if not media:
-            return None
-        if media.startswith("/"):
-            media = "https://www.tikwm.com" + media
-        path = os.path.join(workdir, f"tiktok_{int(time.time())}.{ext}")
-        with requests.get(media, stream=True, timeout=120,
-                          headers={"User-Agent": _UA_DESKTOP,
-                                   "Referer": "https://www.tikwm.com/"}) as resp:
-            resp.raise_for_status()
-            total = 0
-            with open(path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1 << 15):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    total += len(chunk)
-                    if total > MAX_BYTES:
-                        f.close()
-                        os.remove(path)
-                        return None
-        size = os.path.getsize(path)
-        if size == 0:
-            os.remove(path)
-            return None
-        return {
-            "path": path,
-            "size": size,
-            "title": (d.get("title") or "TikTok")[:200],
-            "uploader": ((d.get("author") or {}).get("nickname") or "TikTok"),
-            "duration": int(d.get("duration") or 0),
-            "ext": ext,
-            "thumbnail": d.get("cover"),
-            "webpage_url": url,
-            "audio_only": audio_only,
-        }
-    except Exception:
+    data = None
+    for attempt in range(2):
+        try:
+            r = requests.post(
+                "https://www.tikwm.com/api/",
+                data={"url": url, "hd": "1", "count": "12"},
+                headers={"User-Agent": _UA_DESKTOP},
+                timeout=25,
+            )
+            j = r.json()
+            if r.status_code == 200 and j.get("code") == 0:
+                data = j.get("data") or {}
+                break
+        except Exception:
+            pass
+        time.sleep(1.0)
+    if data is None:
         return None
+    d = data
+    title = (d.get("title") or "TikTok")[:200]
+    uploader = ((d.get("author") or {}).get("nickname") or "TikTok")
+
+    # Photo / slideshow posts
+    pics = d.get("images") or []
+    if pics and not audio_only:
+        paths = []
+        for i, pic in enumerate(pics[:10]):
+            if not isinstance(pic, str):
+                continue
+            if pic.startswith("/"):
+                pic = "https://www.tikwm.com" + pic
+            p = os.path.join(workdir, f"tt_{i}.jpg")
+            if _download_file(pic, p, referer="https://www.tikwm.com/"):
+                paths.append(p)
+        if paths:
+            return {
+                "path": None,
+                "images": paths,
+                "size": sum(os.path.getsize(p) for p in paths),
+                "title": title,
+                "uploader": uploader,
+                "duration": 0,
+                "ext": "jpg",
+                "thumbnail": d.get("cover"),
+                "webpage_url": url,
+                "audio_only": False,
+            }
+
+    if audio_only:
+        media, ext = d.get("music"), "mp3"
+    else:
+        media, ext = (d.get("hdplay") or d.get("play") or d.get("wmplay")), "mp4"
+    if not media:
+        return None
+    if media.startswith("/"):
+        media = "https://www.tikwm.com" + media
+    path = os.path.join(workdir, f"tiktok_{int(time.time())}.{ext}")
+    size = _download_file(media, path, referer="https://www.tikwm.com/")
+    if not size:
+        return None
+    try:
+        path = _ensure_telegram_media(path, audio_only=audio_only)
+        size = os.path.getsize(path)
+    except Exception:
+        pass
+    return {
+        "path": path,
+        "size": size,
+        "title": title,
+        "uploader": uploader,
+        "duration": int(d.get("duration") or 0),
+        "ext": os.path.splitext(path)[1].lstrip(".") or ext,
+        "thumbnail": d.get("cover"),
+        "webpage_url": url,
+        "audio_only": audio_only,
+    }
+
 
 
 _IG_SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)", re.IGNORECASE)
