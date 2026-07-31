@@ -295,8 +295,11 @@ def _inline_after_escape(t: str) -> str:
 
 def format_ai_answer(text: str) -> str:
     """Convert AI markdown-ish output → Telegram-safe rich HTML."""
+    text = sanitize_ai_text(text)
     if not text:
         return ""
+
+
 
     # === Stash buckets — restored AFTER global html.escape ===
     html_blocks: list[str] = []          # opaque pre-built HTML
