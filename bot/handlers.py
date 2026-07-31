@@ -3421,7 +3421,7 @@ def register_handlers(app: Application):
         except Exception:
             pass
 
-    app.add_handler(TypeHandler(Update, _dot_prefix_rewriter), group=-3)
+    app.add_handler(TypeHandler(Update, _dot_prefix_rewriter), group=-6)
 
     # Block sensitive commands from being run in group chats.
     async def _gate_private_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
