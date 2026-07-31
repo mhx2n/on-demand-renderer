@@ -3421,7 +3421,7 @@ def register_handlers(app: Application):
         except Exception:
             pass
 
-    app.add_handler(TypeHandler(Update, _dot_prefix_rewriter), group=-3)
+    app.add_handler(TypeHandler(Update, _dot_prefix_rewriter), group=-6)
 
     # Block sensitive commands from being run in group chats.
     async def _gate_private_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3448,29 +3448,69 @@ def register_handlers(app: Application):
 
     app.add_handler(MessageHandler(filters.COMMAND, _gate_private_only), group=-2)
 
-    # Global gate: blocks disabled commands for non-owners (highest priority).
-    app.add_handler(
-        MessageHandler(filters.COMMAND, _gate_disabled),
-        group=-1,
-    )
+    # ---------------------------------------------------------------
+    # Unified global gate (runs before EVERY other handler group).
+    #
+    # PTB only executes ONE handler per group, so the disabled-command
+    # check and the force-join check must live in a single callback —
+    # otherwise the first one that matches silently swallows the second.
+    # It is registered at group=-5 so it also beats the composer (-4),
+    # the guest/@mention handler (-2) and the owner-broadcast catcher.
+    # ---------------------------------------------------------------
+    import re as _gre
 
-    # Global gate: force-join check. Runs before every command handler so that
-    # tool-pack commands (textenc/language/ocr/etc.) cannot bypass it.
-    async def _gate_force_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _FREE_CMDS = {"start", "setchannel", "forcejoin"}
+
+    async def _global_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if user and is_owner(user.id):
+            return
         msg = update.effective_message
-        if not msg:
-            return
-        text = (msg.text or msg.caption or "")
-        if not text.startswith("/"):
-            return
-        # Skip the setchannel command so the owner can always reconfigure.
-        import re as _re
-        m = _re.match(r"/([A-Za-z0-9_]+)", text)
-        cmd = (m.group(1).lower() if m else "")
-        if cmd in ("start", "setchannel"):
+        text = ((msg.text or msg.caption or "") if msg else "").strip()
+        cmd = ""
+        if text.startswith("/"):
+            m = _gre.match(r"/([A-Za-z0-9_]+)", text)
+            cmd = (m.group(1).lower() if m else "")
+
+        # 1) Owner-disabled commands.
+        if cmd:
+            try:
+                if cmd in await _disabled_set():
+                    if msg:
+                        try:
+                            await msg.reply_text(
+                                "This command is currently disabled by the owner."
+                            )
+                        except Exception:
+                            pass
+                    raise ApplicationHandlerStop
+            except ApplicationHandlerStop:
+                raise
+            except Exception:
+                pass
+
+        # 2) Force-join: everything except the bootstrap commands.
+        if cmd in _FREE_CMDS:
             return
         if not await force_join_ok(update, context):
             raise ApplicationHandlerStop
+
+    app.add_handler(MessageHandler(filters.ALL, _global_gate), group=-5)
+
+    async def _global_gate_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        user = update.effective_user
+        if user and is_owner(user.id):
+            return
+        if not await force_join_ok(update, context):
+            if q:
+                try:
+                    await q.answer("Join our channel first.", show_alert=True)
+                except Exception:
+                    pass
+            raise ApplicationHandlerStop
+
+    app.add_handler(CallbackQueryHandler(_global_gate_cb), group=-5)
 
     app.add_handler(
         MessageHandler(filters.COMMAND, _gate_force_join),
