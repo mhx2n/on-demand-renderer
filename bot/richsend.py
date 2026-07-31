@@ -25,11 +25,14 @@ def enabled() -> bool:
 
 
 def _compose(raw: str, title: str | None) -> str:
-    from .utils import to_rich_markdown
-    body = to_rich_markdown(raw or "")
+    # Native Rich Messages render real ATX headings (#, ##, ###) — keep them
+    # intact here and only strip meta/artefacts. The bold-marker downgrade is
+    # for the plain-HTML fallback path only.
+    from .utils import to_native_rich_markdown
+    body = to_native_rich_markdown(raw or "")
     if not body:
         return ""
-    return f"**{title}**\n\n{body}" if title else body
+    return f"## {title}\n\n{body}" if title else body
 
 
 
