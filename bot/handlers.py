@@ -1219,9 +1219,11 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
         else:
             msg = f"{name} error.\n\n`{e}`"
+        await richsend.cancel(rich_draft)
         if placeholder: await safe_edit(placeholder, msg)
         else: await send_md(update.effective_message, msg)
         await db.log("ERROR", update.effective_user.id, provider_key, f"{e}\n{tb}")
+
 
 
 def make_provider_handler(key: str):
