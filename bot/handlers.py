@@ -22,7 +22,8 @@ from telegram.ext import (
 )
 from telegram import MessageEntity
 
-from . import db, downloader
+from . import db
+from . import channel_post as _channel_post, downloader
 from . import richmsg, richsend
 from .config import OWNER_ID, FORCE_JOIN_CHANNEL
 
@@ -668,7 +669,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit(placeholder, "Help engine unavailable.")
             return
         ans = await asyncio.wait_for(fn(feature_doc, []), timeout=60)
-        await safe_edit(placeholder, format_ai_answer(ans))
+        if not await richsend.reply(update.effective_message, ans,
+                                    placeholder=placeholder):
+            await safe_edit(placeholder, format_ai_answer(ans))
     except Exception as e:
         await safe_edit(placeholder, safe_user_error("Help"))
         await db.log("ERROR", update.effective_user.id if update.effective_user else 0, "help", str(e)[:500])
@@ -1473,7 +1476,9 @@ async def cmd_tryke(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         kind = _PENDING_KIND.get(update.effective_user.id)
         out = await asyncio.wait_for(try_model(key, model, prompt, kind=kind), timeout=120)
-        await stream_edit(placeholder, f"<b>{escape_html(model)}</b>\n\n{format_ai_answer(out)}")
+        if not await richsend.reply(update.effective_message, out, title=model,
+                                    placeholder=placeholder):
+            await stream_edit(placeholder, f"<b>{escape_html(model)}</b>\n\n{format_ai_answer(out)}")
     except Exception as e:
         msg = str(e)
         # Trim long upstream JSON dumps but keep the useful bit
@@ -3095,6 +3100,11 @@ USER_COMMANDS = [
     BotCommand("convert","Universal converter (bin/hex/units/…)"),
     BotCommand("rich",  "Rich message demo / status"),
     BotCommand("slide", "Native image slider from URLs"),
+    BotCommand("post",  "Compose & publish a rich channel post"),
+    BotCommand("aipost","AI-written rich channel post"),
+    BotCommand("channels","Your registered channels"),
+    BotCommand("addchannel","Register a channel for posting"),
+    BotCommand("postformat","Rich post formatting cheat-sheet"),
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
@@ -3417,6 +3427,7 @@ def register_handlers(app: Application):
     _translate.register(app)
     _ocr.register(app)
     _guest.register(app)
+    _channel_post.register(app)
 
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(InlineQueryHandler(on_inline_query))
