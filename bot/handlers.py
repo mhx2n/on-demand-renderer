@@ -3169,6 +3169,8 @@ OWNER_EXTRA = [
     BotCommand("logs",       "Recent logs"),
     BotCommand("users",      "Active user count"),
     BotCommand("announce",   "Broadcast to all users"),
+    BotCommand("richcast",   "Rich broadcast studio (AI + images)"),
+
     BotCommand("setchannel", "Set force-join channel"),
     BotCommand("forcejoin",  "Toggle force-join on/off"),
     BotCommand("ban",        "Ban a user id"),
