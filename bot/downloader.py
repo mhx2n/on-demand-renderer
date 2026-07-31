@@ -832,18 +832,58 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=True)
-                if "entries" in info:
-                    info = info["entries"][0]
+                if not info:
+                    raise RuntimeError("No media metadata returned.")
+                entries = info.get("entries") if isinstance(info, dict) else None
+                if entries:
+                    entries = [e for e in entries if e]
+                    if not entries:
+                        raise RuntimeError("No downloadable entries.")
+                    # Photo carousel → collect every downloaded image
+                    pics = []
+                    for e in entries:
+                        p = ydl.prepare_filename(e)
+                        if os.path.exists(p) and _is_image(p):
+                            pics.append(p)
+                    if pics and not audio_only:
+                        return {
+                            "path": None,
+                            "images": pics[:10],
+                            "size": sum(os.path.getsize(p) for p in pics[:10]),
+                            "title": (info.get("title") or "")[:200],
+                            "uploader": info.get("uploader") or info.get("channel") or "",
+                            "duration": 0,
+                            "ext": "jpg",
+                            "thumbnail": info.get("thumbnail"),
+                            "webpage_url": info.get("webpage_url") or url,
+                            "audio_only": False,
+                        }
+                    info = entries[0]
                 path = ydl.prepare_filename(info)
                 if not os.path.exists(path):
                     base, _ = os.path.splitext(path)
-                    for ext in (".mp3", ".m4a", ".mp4", ".mkv", ".webm", ".mov", ".opus", ".ogg"):
+                    for ext in (".mp3", ".m4a", ".mp4", ".mkv", ".webm", ".mov",
+                                ".opus", ".ogg", ".jpg", ".jpeg", ".png", ".webp"):
                         if os.path.exists(base + ext):
                             path = base + ext
                             break
                 if not os.path.exists(path):
                     raise RuntimeError("Downloaded file vanished.")
+                if _is_image(path) and not audio_only:
+                    return {
+                        "path": None,
+                        "images": [path],
+                        "size": os.path.getsize(path),
+                        "title": (info.get("title") or "")[:200],
+                        "uploader": info.get("uploader") or info.get("channel") or "",
+                        "duration": 0,
+                        "ext": os.path.splitext(path)[1].lstrip("."),
+                        "thumbnail": info.get("thumbnail"),
+                        "webpage_url": info.get("webpage_url") or url,
+                        "audio_only": False,
+                    }
                 path = _ensure_telegram_media(path, audio_only=audio_only)
+
                 size = os.path.getsize(path)
                 if size == 0:
                     raise RuntimeError("Empty download.")
