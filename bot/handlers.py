@@ -3155,7 +3155,9 @@ USER_COMMANDS = [
     BotCommand("aipost","AI-written rich channel post"),
     BotCommand("channels","Your registered channels"),
     BotCommand("addchannel","Register a channel for posting"),
+    BotCommand("addimg","Attach image(s) to the current draft"),
     BotCommand("postformat","Rich post formatting cheat-sheet"),
+
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
