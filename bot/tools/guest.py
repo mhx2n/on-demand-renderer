@@ -21,6 +21,7 @@ from telegram.ext import (
 from ..providers import copilot
 from ..utils import format_ai_answer
 from .. import db
+from .. import richsend
 
 
 SYSTEM_PREFIX = (
@@ -140,8 +141,18 @@ async def _run_guest(
     except Exception:
         pass
 
-    placeholder = await _safe_send(msg, context, _PLACEHOLDER)
+    # Bot API 10.1: in private chats stream a live rich draft instead of
+    # editing a placeholder message.
+    rich_draft = None
+    try:
+        if chat.type == "private":
+            rich_draft = await richsend.begin(chat.id)
+    except Exception:
+        rich_draft = None
+
+    placeholder = None if rich_draft else await _safe_send(msg, context, _PLACEHOLDER)
     sent_message = placeholder
+    sent_id = placeholder.message_id if placeholder else None
 
     last_edit = 0.0
     last_sent = ""
@@ -150,9 +161,20 @@ async def _run_guest(
         async for partial in copilot.ask_stream(SYSTEM_PREFIX + prompt, history or []):
             final_text = partial
             now = time.monotonic()
-            if not placeholder:
+            if not placeholder and not rich_draft:
                 continue
             if now - last_edit < _EDIT_MIN_INTERVAL:
+                continue
+            if rich_draft:
+                if partial == last_sent:
+                    continue
+                last_sent = partial
+                last_edit = now
+                if not await rich_draft.markdown(partial):
+                    rich_draft = None
+                    placeholder = await _safe_send(msg, context, _PLACEHOLDER)
+                    sent_message = placeholder
+                    sent_id = placeholder.message_id if placeholder else None
                 continue
             preview = format_ai_answer(partial) + " ▍"
             if preview == last_sent:
