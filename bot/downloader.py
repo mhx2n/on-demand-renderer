@@ -66,15 +66,57 @@ def detect_url(text: str) -> Optional[str]:
     return url
 
 
-def _cookies_path() -> Optional[str]:
-    cookies = os.getenv("YT_COOKIES_FILE", "").strip()
-    if not cookies:
-        default = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "youtube_cookies.txt",
-        )
-        if os.path.exists(default):
-            cookies = default
-    return cookies if cookies and os.path.exists(cookies) else None
+def _cookies_path(platform: str = "") -> Optional[str]:
+    """Cookie jar for yt-dlp — per platform first, then a generic one."""
+    env_names = []
+    if platform == "instagram":
+        env_names.append("IG_COOKIES_FILE")
+    elif platform == "facebook":
+        env_names.append("FB_COOKIES_FILE")
+    elif platform == "tiktok":
+        env_names.append("TIKTOK_COOKIES_FILE")
+    env_names += ["COOKIES_FILE", "YT_COOKIES_FILE"]
+    for name in env_names:
+        p = (os.getenv(name, "") or "").strip()
+        if p and os.path.exists(p):
+            return p
+    root = os.path.dirname(os.path.dirname(__file__))
+    for fname in (f"{platform}_cookies.txt" if platform else "", "cookies.txt", "youtube_cookies.txt"):
+        if not fname:
+            continue
+        cand = os.path.join(root, fname)
+        if os.path.exists(cand) and os.path.getsize(cand) > 32:
+            return cand
+    return None
+
+
+def _download_file(url: str, path: str, referer: str = "", ua: str = "") -> int:
+    """Stream a remote file to disk with a size cap. Returns bytes written (0 = fail)."""
+    headers = {"User-Agent": ua or _UA_DESKTOP}
+    if referer:
+        headers["Referer"] = referer
+    try:
+        with requests.get(url, stream=True, timeout=120, headers=headers) as resp:
+            resp.raise_for_status()
+            total = 0
+            with open(path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1 << 15):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    total += len(chunk)
+                    if total > MAX_BYTES:
+                        raise RuntimeError("too large")
+        if total == 0 or _looks_like_html(path):
+            raise RuntimeError("not media")
+        return total
+    except Exception:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return 0
+
 
 
 def platform_from_url(url: str) -> str:
