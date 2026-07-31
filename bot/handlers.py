@@ -3072,6 +3072,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "delchannel": _channel_post.cmd_delchannel,
             "postformat": _channel_post.cmd_postformat,
             "cancelpost": _channel_post.cmd_cancelpost,
+            "addimg": _channel_post.cmd_addimg,
+            "clearimg": _channel_post.cmd_clearimg,
+            "richcast": _channel_post.cmd_richcast,
+
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
