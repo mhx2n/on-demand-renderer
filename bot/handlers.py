@@ -256,6 +256,7 @@ TOOL_CATALOG: dict = {
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
         ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
         ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
+        ("post",  "Channel Post","Compose a rich post (tables, LaTeX, lists, quotes, images, links) and publish it to your Telegram channel.\n\n<b>Usage:</b>\n<code>/addchannel @yourchannel</code> (bot must be admin)\n<code>/post</code> → guided composer\n<code>/post # Title\nyour markdown…</code>\n<code>/aipost &lt;topic&gt;</code> → AI writes it\n<code>/channels</code>, <code>/delchannel</code>, <code>/postformat</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
@@ -2071,7 +2072,8 @@ _RESERVED_CMDS = {
     "revoke","restart","mkey","mlimit","addmodel","addprovider","delprovider",
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
-    "rich","slide",
+    "rich","slide","post","aipost","channels","addchannel","delchannel",
+    "postformat","cancelpost",
 }
 
 
@@ -3026,6 +3028,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "top": cmd_top,
             "info": cmd_info, "m2t": cmd_m2t, "time": cmd_time, "vnote": cmd_vnote,
             "convert": cmd_convert, "rich": cmd_rich, "slide": cmd_slide,
+            "post": _channel_post.cmd_post, "aipost": _channel_post.cmd_aipost,
+            "channels": _channel_post.cmd_channels,
+            "addchannel": _channel_post.cmd_addchannel,
+            "delchannel": _channel_post.cmd_delchannel,
+            "postformat": _channel_post.cmd_postformat,
+            "cancelpost": _channel_post.cmd_cancelpost,
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
