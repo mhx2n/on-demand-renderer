@@ -129,6 +129,45 @@ def sanitize_ai_text(text: str) -> str:
 _HEAD_MARK = {1: "🔹", 2: "▌", 3: "▸"}
 
 
+def to_native_rich_markdown(text: str) -> str:
+    """
+    Normalise a model answer for Telegram's NATIVE Rich Message markdown.
+
+    Native rich messages do render real headings, so `#`/`##`/`###` are kept
+    (levels >3 are clamped to `###`), just tidied: single space after the
+    hashes, no trailing hashes, no stray bold/italic markers in the title and
+    a blank line before each heading.
+    """
+    t = sanitize_ai_text(text)
+    if not t:
+        return ""
+
+    out: list[str] = []
+    in_fence = False
+    for line in t.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            out.append(line)
+            continue
+        if in_fence:
+            out.append(line)
+            continue
+        m = re.match(r"^\s{0,3}(#{1,6})\s*(.+?)\s*#*\s*$", line)
+        if m:
+            level = min(len(m.group(1)), 3)
+            title = m.group(2).strip().strip("*_ ").strip()
+            if not title:
+                continue
+            if out and out[-1].strip():
+                out.append("")
+            out.append(f"{'#' * level} {title}")
+            continue
+        out.append(line)
+    return _MULTI_NL.sub("\n\n", "\n".join(out)).strip()
+
+
+
+
 def to_rich_markdown(text: str) -> str:
     """
     Normalise a model answer for Telegram's native Rich Message markdown.
