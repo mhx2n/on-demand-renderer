@@ -22,6 +22,7 @@ from bot.handlers import (
     load_custom_providers,
 )
 from bot.health import run_in_thread
+from bot import richmsg
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -90,6 +91,16 @@ async def _amain():
     except Exception as exc:
         await _startup_error("get_me", exc)
         raise
+    # Rich Messages (Bot API 10.1) — optional Telethon side-channel used for
+    # native tables/LaTeX/task lists and live streaming drafts.
+    try:
+        if await richmsg.init():
+            log.info("Rich Messages enabled (Telethon side-channel connected).")
+        else:
+            log.info("Rich Messages disabled: %s", richmsg.status())
+    except Exception as exc:
+        log.warning("Rich Messages init failed: %s", exc)
+
     run_in_thread(PORT, {"username": me.username, "id": me.id})
     log.info("Health server on :%s | Bot @%s started", PORT, me.username)
 
@@ -132,6 +143,10 @@ async def _amain():
         await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        try:
+            await richmsg.close()
+        except Exception:
+            pass
 
 
 def main():
