@@ -11,6 +11,7 @@ from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from . import _mistral
+from .. import richsend
 from ..config import OWNER_ID
 
 MAX_BYTES = 10 * 1024 * 1024  # 10 MB cap
@@ -155,6 +156,13 @@ async def cmd_ocr(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             body = f"<b>OCR — Extracted Text</b>\n<pre>{_esc(raw)}</pre>"
+
+        if len(body) <= MAX_OUT_CHARS:
+            rich_md = f"## OCR — Extracted\n\n```\n{raw}\n```"
+            if translated:
+                rich_md += f"\n\n## Translation → *{target_lang}*\n\n```\n{translated}\n```"
+            if await richsend.reply(msg, rich_md, placeholder=placeholder):
+                return
 
         # Long output -> send as .txt file
         if len(body) > MAX_OUT_CHARS:

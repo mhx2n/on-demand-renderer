@@ -12,6 +12,7 @@ from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from ..providers import REGISTRY
+from .. import richsend
 
 _HTTP_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -69,6 +70,11 @@ async def cmd_spell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         body = (f"<b>Input:</b> <code>{html.escape(target)}</code>\n"
                 f"<i>No suggestions found — word may already be correct.</i>")
+    rich_md = f"## Spell Check\n\n{body}".replace("<b>", "**").replace("</b>", "**")
+    rich_md = rich_md.replace("<code>", "`").replace("</code>", "`")
+    rich_md = rich_md.replace("<i>", "*").replace("</i>", "*")
+    if await richsend.reply(update.effective_message, rich_md):
+        return
     await update.effective_message.reply_text(_frame("Spell Check", body),
                                               parse_mode=ParseMode.HTML)
 
@@ -96,6 +102,10 @@ async def cmd_gra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     body = (f"<b>Original:</b>\n<code>{html.escape(sentence)}</code>\n\n"
             f"<b>Corrected:</b>\n<code>{html.escape(fixed)}</code>")
+    rich_md = (f"## Grammar Fix\n\n**Original**\n```\n{sentence}\n```\n\n"
+               f"**Corrected**\n```\n{fixed}\n```")
+    if await richsend.reply(update.effective_message, rich_md, placeholder=msg):
+        return
     try:
         await msg.edit_text(_frame("Grammar Fix", body), parse_mode=ParseMode.HTML)
     except Exception:
@@ -124,6 +134,11 @@ async def cmd_syn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     body = (f"<b>Word:</b> <code>{html.escape(target)}</code>\n\n"
             f"<b>Synonyms:</b> <code>{html.escape(syn_t)}</code>\n\n"
             f"<b>Antonyms:</b> <code>{html.escape(ant_t)}</code>")
+    rich_md = (f"## Synonyms / Antonyms\n\n**Word:** `{target}`\n\n"
+               f"| Type | Words |\n|:--|:--|\n"
+               f"| Synonyms | {syn_t} |\n| Antonyms | {ant_t} |")
+    if await richsend.reply(update.effective_message, rich_md):
+        return
     await update.effective_message.reply_text(_frame("Synonyms / Antonyms", body),
                                               parse_mode=ParseMode.HTML)
 
@@ -164,8 +179,14 @@ async def cmd_prn(update: Update, context: ContextTypes.DEFAULT_TYPE):
         body_lines.append(f"<b>Meaning:</b> {html.escape(meaning)}")
     if not phonetic and not meaning:
         body_lines.append("<i>No pronunciation found for that word.</i>")
-    await update.effective_message.reply_text(_frame("Pronunciation", "\n".join(body_lines)),
-                                              parse_mode=ParseMode.HTML)
+    rich_lines = [f"## Pronunciation\n", f"**Word:** `{target}`"]
+    if phonetic:
+        rich_lines.append(f"**Phonetic:** `{phonetic}`")
+    if meaning:
+        rich_lines.append(f"> {meaning}")
+    if not await richsend.reply(update.effective_message, "\n\n".join(rich_lines)):
+        await update.effective_message.reply_text(
+            _frame("Pronunciation", "\n".join(body_lines)), parse_mode=ParseMode.HTML)
     if audio_url:
         try:
             if audio_url.startswith("//"):
