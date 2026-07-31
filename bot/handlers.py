@@ -3512,10 +3512,8 @@ def register_handlers(app: Application):
 
     app.add_handler(CallbackQueryHandler(_global_gate_cb), group=-5)
 
-    app.add_handler(
-        MessageHandler(filters.COMMAND, _gate_force_join),
-        group=-1,
-    )
+
+
 
     # User
     app.add_handler(CommandHandler("start", cmd_start))
