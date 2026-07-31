@@ -394,7 +394,11 @@ def _ydl_base(url: str) -> dict:
             "acodec:aac",
             "ext:mp4:m4a",
         ]
+    cookies = _cookies_path(platform)
+    if cookies:
+        opts["cookiefile"] = cookies
     return opts
+
 
 
 # Format ladder (descending preference). Each tier stays under MAX_BYTES.
