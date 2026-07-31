@@ -23,7 +23,9 @@ from telegram.ext import (
 from telegram import MessageEntity
 
 from . import db, downloader
+from . import richmsg, richsend
 from .config import OWNER_ID, FORCE_JOIN_CHANNEL
+
 from .providers import (
     REGISTRY,
     register as register_provider,
