@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS start_events (
     user_id INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_start_events_ts ON start_events(ts);
+CREATE TABLE IF NOT EXISTS channels (
+    chat_id INTEGER PRIMARY KEY,
+    owner_user_id INTEGER,
+    title TEXT,
+    username TEXT,
+    added_at INTEGER
+);
 CREATE TABLE IF NOT EXISTS groups (
     chat_id INTEGER PRIMARY KEY,
     title TEXT,
@@ -373,3 +380,54 @@ async def top_users(limit: int = 10):
             (int(limit),),
         ) as cur:
             return await cur.fetchall()
+
+
+# ---------- rich channels ----------
+async def add_channel(chat_id: int, owner_user_id: int, title: str = "", username: str = ""):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO channels(chat_id, owner_user_id, title, username, added_at)
+               VALUES(?,?,?,?,?)
+               ON CONFLICT(chat_id) DO UPDATE SET
+                 owner_user_id=excluded.owner_user_id,
+                 title=excluded.title,
+                 username=excluded.username""",
+            (int(chat_id), int(owner_user_id), title or "", username or "", int(time.time())),
+        )
+        await db.commit()
+    mongo.fire(mongo.upsert("channels", {"_id": int(chat_id)}, {
+        "owner_user_id": int(owner_user_id), "title": title or "",
+        "username": username or "", "added_at": int(time.time()),
+    }))
+
+
+async def remove_channel(chat_id: int, owner_user_id: int | None = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if owner_user_id is None:
+            await db.execute("DELETE FROM channels WHERE chat_id=?", (int(chat_id),))
+        else:
+            await db.execute(
+                "DELETE FROM channels WHERE chat_id=? AND owner_user_id=?",
+                (int(chat_id), int(owner_user_id)),
+            )
+        await db.commit()
+
+
+async def list_channels(owner_user_id: int | None = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if owner_user_id is None:
+            q, a = "SELECT chat_id, owner_user_id, title, username FROM channels ORDER BY added_at", ()
+        else:
+            q, a = ("SELECT chat_id, owner_user_id, title, username FROM channels "
+                    "WHERE owner_user_id=? ORDER BY added_at", (int(owner_user_id),))
+        async with db.execute(q, a) as cur:
+            return await cur.fetchall()
+
+
+async def get_channel(chat_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, owner_user_id, title, username FROM channels WHERE chat_id=?",
+            (int(chat_id),),
+        ) as cur:
+            return await cur.fetchone()

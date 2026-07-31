@@ -87,3 +87,44 @@ async def deliver(chat_id: int, raw_markdown: str, title: str | None = None,
         return None
     finally:
         await cancel(draft)
+
+
+async def reply(message, raw_markdown: str, title: str | None = None,
+                placeholder=None, stream: bool = False) -> bool:
+    """
+    Try to answer `message` with a native Rich Message.
+
+    Returns True when the rich message was sent (caller should stop), False
+    when the caller must fall back to its classic HTML path.
+    """
+    if not enabled() or not (raw_markdown or "").strip():
+        return False
+    try:
+        chat_id = message.chat_id if hasattr(message, "chat_id") else message.chat.id
+        mid = await deliver(
+            chat_id, raw_markdown, title=title,
+            reply_to=getattr(message, "message_id", None), stream=stream,
+        )
+    except Exception as e:
+        log.debug("rich reply failed: %s", e)
+        return False
+    if not mid:
+        return False
+    if placeholder is not None:
+        try:
+            await placeholder.delete()
+        except Exception:
+            pass
+    return True
+
+
+async def edit_or_reply(placeholder, message, raw_markdown: str,
+                        title: str | None = None, stream: bool = False) -> bool:
+    """Same as `reply` but deletes the given placeholder on success."""
+    return await reply(message, raw_markdown, title=title,
+                       placeholder=placeholder, stream=stream)
+
+
+async def post(chat_id: int, raw_markdown: str, title: str | None = None):
+    """Post a rich message to any chat/channel. Returns message id or None."""
+    return await deliver(chat_id, raw_markdown, title=title, stream=False)
