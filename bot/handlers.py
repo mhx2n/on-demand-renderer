@@ -23,7 +23,9 @@ from telegram.ext import (
 from telegram import MessageEntity
 
 from . import db, downloader
+from . import richmsg, richsend
 from .config import OWNER_ID, FORCE_JOIN_CHANNEL
+
 from .providers import (
     REGISTRY,
     register as register_provider,
@@ -251,9 +253,12 @@ TOOL_CATALOG: dict = {
         ("time",  "World Time","World clock + monthly calendar for any country.\n\n<b>Usage:</b>\n<code>/time bd</code>, <code>/time us</code>, <code>/time jp</code> …"),
         ("vnote", "Video → Note","Convert any reply-video into a circular Telegram video note (max 60s).\n\n<b>Usage:</b> Reply to a video with <code>/vnote</code> or <code>.vnote</code>."),
         ("convert","Universal Converter","Number systems, codes, data encoding, networking, units, hashing — with AI step-by-step explanation.\n\n<b>Usage:</b>\n<code>/convert</code> → open the format menu (paginated)\n<code>/convert &lt;type&gt; &lt;value&gt;</code> → run directly\nReply to a message with <code>/convert &lt;type&gt;</code>."),
+        ("rich",  "Rich Messages","Show Bot API 10.1 rich message status, render a demo, or test your own rich markdown.\n\n<b>Usage:</b>\n<code>/rich</code> — status + demo\n<code>/rich # heading\n| a | b |</code>"),
+        ("slide", "Image Slider","Send a native Telegram image slider (slideshow rich block).\n\n<b>Usage:</b>\n<code>/slide https://url1 https://url2 …</code>"),
         ("top",   "Top Users",    "See the top 10 most active users of this bot.\n\n<b>Usage:</b> <code>/top</code>"),
         ("ping",  "Ping",         "Bot latency check.\n\n<b>Usage:</b> <code>/ping</code>"),
         ("help",  "Help / About", "AI-summarised help.\n\n<b>Usage:</b>\n<code>/help</code> or <code>/help &lt;topic&gt;</code>"),
+
     ],
 }
 
@@ -1142,8 +1147,15 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
     history = _HISTORY.get(history_key, []) if history_key else []
 
     live = (await db.get_setting("live_response", "on")) == "on"
+    chat_id = update.effective_chat.id
+    is_private = update.effective_chat.type == "private"
+
+    # Bot API 10.1 Rich Messages: in private chats we stream a live rich
+    # draft while the provider thinks, then send the final rich message.
+    rich_draft = await richsend.begin(chat_id) if (live and is_private) else None
+
     placeholder = None
-    if live:
+    if live and rich_draft is None:
         placeholder = await update.effective_message.reply_text(f"{name} is thinking...")
 
     try:
@@ -1152,27 +1164,44 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
         # Clear any prior exhausted flag on success.
         try: await _mark_provider_exhausted(provider_key, False)
         except Exception: pass
-        body = f"<b>{escape_html(name)}</b>\n\n{answer_fmt}"
-        if placeholder:
-            await stream_edit(placeholder, body)
-            sent = placeholder
-        else:
-            sent = await send_md(update.effective_message, body)
 
-        new_root = root_id or sent.message_id
+        rich_mid = await richsend.deliver(
+            chat_id, answer, title=name,
+            reply_to=update.effective_message.message_id,
+            draft=rich_draft, stream=live,
+        )
+
+        if rich_mid:
+            sent_id = rich_mid
+            if placeholder:
+                try: await placeholder.delete()
+                except Exception: pass
+        else:
+            body = f"<b>{escape_html(name)}</b>\n\n{answer_fmt}"
+            if placeholder:
+                await stream_edit(placeholder, body)
+                sent_id = placeholder.message_id
+            else:
+                sent = await send_md(update.effective_message, body)
+                sent_id = sent.message_id
+
+        new_root = root_id or sent_id
         hist = _HISTORY[(update.effective_chat.id, new_root)]
         hist.append({"q": prompt, "a": (answer or "")[:4000]})
         _HISTORY[(update.effective_chat.id, new_root)] = hist[-10:]
         state = json.dumps(_HISTORY[(update.effective_chat.id, new_root)])
         await db.save_session(update.effective_chat.id, new_root, provider_key, state)
-        if sent.message_id != new_root:
-            await db.save_session(update.effective_chat.id, sent.message_id, provider_key, state)
+        if sent_id != new_root:
+            await db.save_session(update.effective_chat.id, sent_id, provider_key, state)
         await db.log("INFO", update.effective_user.id, provider_key, prompt[:200])
+
     except asyncio.TimeoutError:
+        await richsend.cancel(rich_draft)
         msg = f"{name} timed out. Please retry."
         if placeholder: await safe_edit(placeholder, msg)
         else: await update.effective_message.reply_text(msg)
         await db.log("ERROR", update.effective_user.id, provider_key, "timeout")
+
     except Exception as e:
         tb = traceback.format_exc(limit=2)
         err_text = str(e)
@@ -1195,9 +1224,11 @@ async def _call_provider(update: Update, context: ContextTypes.DEFAULT_TYPE,
             )
         else:
             msg = f"{name} error.\n\n`{e}`"
+        await richsend.cancel(rich_draft)
         if placeholder: await safe_edit(placeholder, msg)
         else: await send_md(update.effective_message, msg)
         await db.log("ERROR", update.effective_user.id, provider_key, f"{e}\n{tb}")
+
 
 
 def make_provider_handler(key: str):
@@ -1208,6 +1239,130 @@ def make_provider_handler(key: str):
         prompt = parts[1] if len(parts) > 1 else ""
         await _call_provider(update, context, key, prompt)
     return handler
+
+
+# ============================================================
+# Rich Messages (Bot API 10.1) — demo, status and image slider
+# ============================================================
+_RICH_DEMO = """# Rich Message Demo
+
+Native Telegram rich markdown — tables, LaTeX, task lists, code blocks,
+quotes and collapsible details, all rendered by Telegram itself.
+
+## Table
+
+| Feature   | Status | Priority |
+|:----------|:------:|---------:|
+| Rich text |   ✅   | High     |
+| Streaming |   ✅   | High     |
+| Slider    |   ✅   | Medium   |
+
+## Math
+
+Inline: $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$
+
+$$
+\\int_{0}^{\\infty} e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}
+$$
+
+## Task list
+
+- [x] Rich message layer
+- [x] Live draft streaming
+- [ ] Your next idea
+
+## Code
+
+```python
+print("Hello, rich messages!")
+```
+
+> Rich Messages are for structured replies — reports, AI answers, docs.
+
+---
+Send `/slide <url> <url> …` for a native image slider."""
+
+
+async def cmd_rich(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show rich-message status, or render a demo / your own markdown."""
+    if not await force_join_ok(update, context):
+        return
+    msg = update.effective_message
+    arg = " ".join(context.args or []).strip()
+
+    if arg.lower() in ("", "status"):
+        st = richmsg.status()
+        if not arg:
+            markdown = _RICH_DEMO
+            mid = await richsend.deliver(
+                update.effective_chat.id, markdown,
+                reply_to=msg.message_id, stream=False,
+            )
+            if mid:
+                return
+        await send_md(
+            msg,
+            "<b>Rich Messages (Bot API 10.1)</b>\n"
+            f"• Telethon installed: <code>{st['telethon']}</code>\n"
+            f"• API credentials: <code>{st['configured']}</code>\n"
+            f"• Connected: <code>{st['connected']}</code>\n"
+            f"• Supported by server: <code>{st['rich_supported']}</code>\n\n"
+            "Set <code>TELEGRAM_API_ID</code> and <code>TELEGRAM_API_HASH</code> "
+            "(from my.telegram.org) to enable native tables, LaTeX, task lists, "
+            "collapsible details and live streaming drafts.",
+        )
+        return
+
+    mid = await richsend.deliver(
+        update.effective_chat.id, arg, reply_to=msg.message_id, stream=False,
+    )
+    if not mid:
+        await send_md(msg, format_ai_answer(arg))
+
+
+async def cmd_slide(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Native image slider: /slide <url1> <url2> ... (or reply to photos)."""
+    if not await force_join_ok(update, context):
+        return
+    msg = update.effective_message
+    urls = [a for a in (context.args or []) if a.startswith("http")]
+    caption = ""
+    if not urls:
+        await msg.reply_text(
+            "Usage: /slide <image url> <image url> …  (2–10 images)\n"
+            "Example: /slide https://picsum.photos/id/237/800/600 "
+            "https://picsum.photos/id/1015/800/600",
+        )
+        return
+    if not richsend.enabled():
+        # Fallback: classic album so the command always does something useful.
+        try:
+            from telegram import InputMediaPhoto
+            await context.bot.send_media_group(
+                chat_id=update.effective_chat.id,
+                media=[InputMediaPhoto(u) for u in urls[:10]],
+            )
+        except Exception:
+            await msg.reply_text(
+                "Image slider needs rich messages. Ask the owner to set "
+                "TELEGRAM_API_ID / TELEGRAM_API_HASH.",
+            )
+        return
+
+    note = await msg.reply_text("Building slider…")
+    mid = await richmsg.send_slideshow(
+        update.effective_chat.id, urls[:10], caption=caption,
+        reply_to=msg.message_id,
+    )
+    try:
+        await note.delete()
+    except Exception:
+        pass
+    if not mid:
+        await msg.reply_text("Couldn't build the slider. Check the image URLs.")
+
+
+
 
 
 # ============================================================
@@ -1911,7 +2066,9 @@ _RESERVED_CMDS = {
     "revoke","restart","mkey","mlimit","addmodel","addprovider","delprovider",
     "providers","en","de","text","wc","spell","gra","syn","prn","bg","enh","res",
     "short","style","tr","ocr","info","m2t","time","vnote","top","convert",
+    "rich","slide",
 }
+
 
 _PROVIDER_BASE_URLS = {
     "openai":     "https://api.openai.com/v1",
@@ -2863,7 +3020,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "ping": cmd_ping, "key": cmd_key, "tryke": cmd_tryke, "dl": cmd_dl,
             "top": cmd_top,
             "info": cmd_info, "m2t": cmd_m2t, "time": cmd_time, "vnote": cmd_vnote,
-            "convert": cmd_convert,
+            "convert": cmd_convert, "rich": cmd_rich, "slide": cmd_slide,
         }
         if cmd in alias:
             context.args = rest.split() if rest else []
@@ -2936,6 +3093,8 @@ USER_COMMANDS = [
     BotCommand("time",  "World time + calendar (e.g. /time bd)"),
     BotCommand("vnote", "Reply to video → circular note"),
     BotCommand("convert","Universal converter (bin/hex/units/…)"),
+    BotCommand("rich",  "Rich message demo / status"),
+    BotCommand("slide", "Native image slider from URLs"),
     BotCommand("top",   "Top 10 users"),
     BotCommand("ping",  "Latency check"),
     BotCommand("help",  "Help (add a topic for AI summary)"),
@@ -3222,6 +3381,8 @@ def register_handlers(app: Application):
     app.add_handler(CommandHandler("time",  cmd_time))
     app.add_handler(CommandHandler("vnote", cmd_vnote))
     app.add_handler(CommandHandler("convert", cmd_convert))
+    app.add_handler(CommandHandler("rich",  cmd_rich))
+    app.add_handler(CommandHandler("slide", cmd_slide))
 
     for k in list(REGISTRY.keys()):
         app.add_handler(CommandHandler(k, make_provider_handler(k)))
