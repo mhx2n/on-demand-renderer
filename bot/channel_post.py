@@ -642,7 +642,9 @@ async def _preview(msg, uid: int, final: bool = False):
         return
 
     # Clean slate: every regeneration replaces the old preview entirely.
+    await _clear_aux(msg, uid)
     await _wipe_preview(msg, uid)
+
 
     layout = st.get("layout", "inside_top")
     kb = InlineKeyboardMarkup([
