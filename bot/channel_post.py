@@ -126,6 +126,12 @@ def _st(uid: int) -> dict:
     st.setdefault("ctrl_ids", set())
     st.setdefault("layout", "inside_top")
     st.setdefault("caption", "")
+    st.setdefault("aux_ids", [])
+    if st.get("photo_lock") is None:
+        try:
+            st["photo_lock"] = asyncio.Lock()
+        except Exception:
+            st["photo_lock"] = None
     return st
 
 
@@ -147,6 +153,36 @@ def _track(uid: int, message) -> None:
     ids.add(getattr(message, "message_id", 0))
     if len(ids) > 20:
         st["ctrl_ids"] = set(sorted(ids)[-20:])
+
+
+def _aux(uid: int, message) -> None:
+    """Remember a transient helper message so it can be swept away later."""
+    mid = getattr(message, "message_id", None)
+    if not mid:
+        return
+    _st(uid).setdefault("aux_ids", []).append(int(mid))
+
+
+async def _clear_aux(msg, uid: int) -> None:
+    """Delete every transient prompt/status message of this composer turn."""
+    st = _st(uid)
+    ids = list(dict.fromkeys(st.get("aux_ids") or []))
+    st["aux_ids"] = []
+    note = st.get("img_note_id")
+    if note:
+        ids.append(int(note))
+    st["img_note_id"] = None
+    try:
+        bot = msg.get_bot()
+    except Exception:
+        return
+    for mid in ids:
+        try:
+            await bot.delete_message(msg.chat_id, mid)
+        except Exception:
+            pass
+        st.get("ctrl_ids", set()).discard(mid)
+
 
 
 def _parse_draft(text: str) -> tuple[str, list[str], str | None]:
