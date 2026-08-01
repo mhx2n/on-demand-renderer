@@ -450,3 +450,45 @@ async def send_slideshow(chat_id: int, images: list, caption: str = "",
         log.debug("send_slideshow failed: %s", e)
 
         return None
+
+
+async def send_composed(chat_id: int, markdown: str, images: list,
+                        placement: str = "inside_top", caption: str = ""):
+    """Send markdown and uploaded media as one native Rich Message."""
+    if not available() or not images:
+        return None
+    try:
+        peer = await _resolve(chat_id)
+        files, media_tags = [], []
+        for index, entry in enumerate(images[:10], 1):
+            source = entry[0] if isinstance(entry, (tuple, list)) else entry
+            photo = await _upload_photo(peer, source, name=f"slide-{index}.jpg")
+            media_id = f"slide{index}"
+            files.append(types.InputRichFilePhoto(id=media_id, photo=photo))
+            media_tags.append(f'<img src="tg://photo?id={media_id}">')
+        if not files:
+            return None
+        safe_caption = (caption or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        slider = "<tg-slideshow>\n" + "\n".join(media_tags)
+        if safe_caption:
+            slider += f"\n<figcaption>{safe_caption}</figcaption>"
+        slider += "\n</tg-slideshow>"
+        text = (markdown or "").strip()
+        composed = (f"{slider}\n\n{text}" if placement == "inside_top"
+                    else f"{text}\n\n{slider}")
+        result = await _call(functions.messages.SendMessageRequest(
+            peer=peer,
+            message=_plain(text or caption or "slideshow"),
+            random_id=helpers.generate_random_long(),
+            rich_message=types.InputRichMessageMarkdown(
+                markdown=composed[:32768], files=files),
+            no_webpage=True,
+        ), timeout=90.0)
+        return _extract_id(result)
+    except asyncio.TimeoutError:
+        log.debug("send_composed timed out")
+        return None
+    except Exception as e:
+        _mark_unsupported(e)
+        log.debug("send_composed failed: %s", e)
+        return None

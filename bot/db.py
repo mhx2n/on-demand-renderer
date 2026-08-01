@@ -384,6 +384,7 @@ async def top_users(limit: int = 10):
 
 # ---------- rich channels ----------
 async def add_channel(chat_id: int, owner_user_id: int, title: str = "", username: str = ""):
+    added_at = int(time.time())
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO channels(chat_id, owner_user_id, title, username, added_at)
@@ -392,26 +393,40 @@ async def add_channel(chat_id: int, owner_user_id: int, title: str = "", usernam
                  owner_user_id=excluded.owner_user_id,
                  title=excluded.title,
                  username=excluded.username""",
-            (int(chat_id), int(owner_user_id), title or "", username or "", int(time.time())),
+            (int(chat_id), int(owner_user_id), title or "", username or "", added_at),
         )
         await db.commit()
-    mongo.fire(mongo.upsert("channels", {"_id": int(chat_id)}, {
-        "owner_user_id": int(owner_user_id), "title": title or "",
-        "username": username or "", "added_at": int(time.time()),
-    }))
+    # Confirmation means durable: do not leave this write in a background task
+    # which a restart can cancel before MongoDB receives it.
+    if mongo.enabled():
+        try:
+            await mongo.upsert("channels", {"_id": int(chat_id)}, {
+                "owner_user_id": int(owner_user_id), "title": title or "",
+                "username": username or "", "added_at": added_at,
+            })
+        except Exception as exc:
+            log.warning("channel mirror write failed for %s: %s", chat_id, exc)
 
 
 async def remove_channel(chat_id: int, owner_user_id: int | None = None):
+    removed = False
     async with aiosqlite.connect(DB_PATH) as db:
         if owner_user_id is None:
-            await db.execute("DELETE FROM channels WHERE chat_id=?", (int(chat_id),))
+            cur = await db.execute("DELETE FROM channels WHERE chat_id=?", (int(chat_id),))
         else:
-            await db.execute(
+            cur = await db.execute(
                 "DELETE FROM channels WHERE chat_id=? AND owner_user_id=?",
                 (int(chat_id), int(owner_user_id)),
             )
+        removed = bool(cur.rowcount)
         await db.commit()
-    mongo.fire(mongo.delete("channels", {"_id": int(chat_id)}))
+    # Never erase another owner's mirror row when the scoped SQLite delete did
+    # not match. Await successful deletions for the same restart guarantee.
+    if removed and mongo.enabled():
+        try:
+            await mongo.delete("channels", {"_id": int(chat_id)})
+        except Exception as exc:
+            log.warning("channel mirror delete failed for %s: %s", chat_id, exc)
 
 
 async def list_channels(owner_user_id: int | None = None):
