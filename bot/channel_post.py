@@ -578,7 +578,7 @@ def _keep(uid: int, mid) -> None:
     _st(uid).setdefault("preview_ids", []).append(int(mid))
 
 
-async def _preview(msg, uid: int):
+async def _preview(msg, uid: int, final: bool = False):
     st = _st(uid)
     body, inline_imgs, title = _parse_draft(st.get("draft", ""))
     images = _all_images(uid, inline_imgs)
@@ -596,13 +596,17 @@ async def _preview(msg, uid: int):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
          InlineKeyboardButton("♻️ Regenerate", callback_data="cp:regen:1")],
+        [InlineKeyboardButton("🖼 Add images", callback_data="cp:img:1"),
+         InlineKeyboardButton("👁 Final review", callback_data="cp:review:1")],
         [InlineKeyboardButton("🗑 Clear images", callback_data="cp:noimg:1"),
          InlineKeyboardButton("✖ Cancel", callback_data="cp:cancel:0")],
     ])
     name = await _target_name(uid)
-    header = f"<b>Preview → {_esc(name)}</b>"
+    label = "Final review" if final else "Preview"
+    header = f"<b>{label} → {_esc(name)}</b>"
     if images:
-        header += f"  ·  {len(images)} image(s)"
+        header += (f"  ·  {len(images)} image(s)"
+                   + ("  ·  slider" if len(images) > 1 else ""))
 
     md = (f"# {title}\n\n" if title else "") + body
     if images and len(images) > 1 and richsend.enabled():
@@ -629,13 +633,18 @@ async def _preview(msg, uid: int):
                 disable_web_page_preview=True)
             _keep(uid, getattr(sent, "message_id", None))
 
-    ctrl = await msg.reply_text(
-        header + "\n\nPublish this post?\n"
-        "<i>Reply to this message with instructions to rewrite it "
-        "(shorten, translate, add/remove sections…).</i>",
-        parse_mode=ParseMode.HTML, reply_markup=kb)
+    if final:
+        note = ("\n\nThis is exactly how the post will look in "
+                f"<b>{_esc(name)}</b>. Publish it?")
+    else:
+        note = ("\n\nPublish this post?\n"
+                "<i>Reply to this message with instructions to rewrite it "
+                "(shorten, translate, add/remove sections…), or tap 🖼 Add images.</i>")
+    ctrl = await msg.reply_text(header + note,
+                                parse_mode=ParseMode.HTML, reply_markup=kb)
     _track(uid, ctrl)
     _keep(uid, getattr(ctrl, "message_id", None))
+
 
 
 
