@@ -593,13 +593,121 @@ def _ig_media_id(shortcode: str) -> Optional[str]:
         return None
 
 
+def _ig_img_index(url: str) -> Optional[int]:
+    m = re.search(r"[?&]img_index=(\d+)", url or "")
+    try:
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
 def _ig_canonical(url: str) -> str:
-    """Drop tracking params (?igsh=...) which often break extraction."""
+    """Drop tracking params (?igsh=…) but keep the carousel index."""
     code = _ig_shortcode(url)
     if not code:
         return url
     kind = "reel" if re.search(r"/reels?/", url or "", re.IGNORECASE) else "p"
-    return f"https://www.instagram.com/{kind}/{code}/"
+    idx = _ig_img_index(url)
+    base = f"https://www.instagram.com/{kind}/{code}/"
+    return f"{base}?img_index={idx}" if idx else base
+
+
+# --- Cobalt resolver -------------------------------------------------------
+# Public cobalt instances return *typed* media (video vs photo) and full
+# carousel pickers, so a reel never degrades into its cover image.
+_COBALT_INSTANCES = (
+    "https://co.otomir23.me",
+    "https://cobalt-backend.canine.tools",
+    "https://api.cobalt.tools",
+    "https://cobalt-api.kwiatekmiki.com",
+)
+
+
+def _cobalt_resolve(url: str, audio_only: bool = False) -> list[dict]:
+    """Resolve a social URL into [{'type': 'video'|'photo', 'url': …}, …]."""
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": _UA_DESKTOP,
+    }
+    body = {
+        "url": url,
+        "videoQuality": "1080",
+        "filenameStyle": "basic",
+        "alwaysProxy": False,
+    }
+    if audio_only:
+        body["downloadMode"] = "audio"
+        body["audioFormat"] = "mp3"
+
+    for base in _COBALT_INSTANCES:
+        h = dict(headers)
+        try:
+            s = requests.post(base + "/session", headers={"User-Agent": _UA_DESKTOP,
+                                                          "Accept": "application/json"},
+                              timeout=15)
+            if s.status_code == 200:
+                tok = (s.json() or {}).get("token")
+                if tok:
+                    h["Authorization"] = f"Bearer {tok}"
+        except Exception:
+            pass
+        try:
+            r = requests.post(base + "/", json=body, headers=h, timeout=60)
+            if r.status_code != 200:
+                continue
+            data = r.json() or {}
+        except Exception:
+            continue
+
+        status = data.get("status")
+        out: list[dict] = []
+        if status in {"redirect", "tunnel", "stream"} and data.get("url"):
+            out.append({"type": "audio" if audio_only else "video", "url": data["url"]})
+        elif status == "picker":
+            for it in (data.get("picker") or []):
+                u = it.get("url")
+                if not u:
+                    continue
+                kind = (it.get("type") or "photo").lower()
+                out.append({"type": "video" if kind in {"video", "gif"} else "photo",
+                            "url": u})
+            if data.get("audio") and audio_only:
+                out.append({"type": "audio", "url": data["audio"]})
+        if out:
+            return out
+    return []
+
+
+def _media_ext(url: str, fallback: str) -> str:
+    path = urlparse(url or "").path.lower()
+    for e in (".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".webp", ".mp3", ".m4a"):
+        if path.endswith(e):
+            return e
+    return fallback
+
+
+def _to_jpeg(path: str) -> str:
+    """Normalise .webp / .heic stills to JPEG so Telegram always accepts them."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".jpg", ".jpeg", ".png"}:
+        return path
+    out = os.path.splitext(path)[0] + ".jpg"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", path, "-frames:v", "1", out],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, check=False,
+        )
+        if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 1024:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return out
+    except Exception:
+        pass
+    return path
+
 
 
 def _netscape_cookies(path: str) -> dict:
