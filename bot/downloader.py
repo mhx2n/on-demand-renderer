@@ -1175,17 +1175,28 @@ def _fb_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                 "audio_only": audio_only,
             }
 
-    if images and not audio_only:
-        paths = []
-        for i, iu in enumerate(images[:10]):
-            p = os.path.join(workdir, f"fb_{i}.jpg")
-            if _download_file(iu, p, referer="https://www.facebook.com/", ua=_UA_IOS):
-                paths.append(p)
+    if not audio_only:
+        paths: list[str] = []
+        # Carousel-aware scrape first; the og:image list is only a last resort.
+        scraped = _fb_download_images(url, workdir)
+        if len(scraped) > len(paths):
+            paths = scraped
+        if len(paths) < 2 and images:
+            simple = []
+            for i, iu in enumerate(images[:10]):
+                p = os.path.join(workdir, f"fb_{i}.jpg")
+                if _download_file(iu, p, referer="https://www.facebook.com/", ua=_UA_IOS):
+                    try:
+                        simple.append(_to_jpeg(p))
+                    except Exception:
+                        simple.append(p)
+            if len(simple) > len(paths):
+                paths = simple
         if paths:
             return {
                 "path": None,
-                "images": paths,
-                "size": sum(os.path.getsize(p) for p in paths),
+                "images": paths[:10],
+                "size": sum(os.path.getsize(p) for p in paths[:10]),
                 "title": title,
                 "uploader": "Facebook",
                 "duration": 0,
@@ -1194,6 +1205,7 @@ def _fb_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                 "webpage_url": url,
                 "audio_only": False,
             }
+
     return None
 
 
