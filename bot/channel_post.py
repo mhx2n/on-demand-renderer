@@ -863,12 +863,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, action, arg = (data.split(":", 2) + ["", ""])[:3]
 
     if action == "cancel":
+        await _clear_aux(q.message, uid)
         _STATE.pop(uid, None)
         try:
             await q.edit_message_text("Cancelled.")
         except Exception:
             pass
         return
+
 
     if action == "ch":
         _st(uid)["chat_id"] = int(arg)
