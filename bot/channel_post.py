@@ -353,7 +353,8 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     st = _st(uid)
     st.update({"draft": "", "chat_id": None, "mode": None,
-               "target": "channel", "images": [], "ctrl_ids": set()})
+               "target": "channel", "images": [], "ctrl_ids": set(),
+               "layout": "inside_top", "caption": ""})
 
     if not draft:
         draft = replied
@@ -395,7 +396,8 @@ async def cmd_aipost(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source = _replied_text(msg)
     st = _st(uid)
     st.update({"target": "channel", "chat_id": None, "draft": "",
-               "images": [], "ctrl_ids": set(), "mode": None})
+               "images": [], "ctrl_ids": set(), "mode": None,
+               "layout": "inside_top", "caption": ""})
     if not await db.list_channels(uid):
         await msg.reply_text(
             "First register a channel: /addchannel @yourchannel")
@@ -431,7 +433,8 @@ async def cmd_richcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     source = _replied_text(msg)
     st = _st(uid)
     st.update({"target": "broadcast", "chat_id": None, "draft": "",
-               "images": [], "ctrl_ids": set(), "mode": None})
+               "images": [], "ctrl_ids": set(), "mode": None,
+               "layout": "inside_top", "caption": ""})
 
     rep = getattr(msg, "reply_to_message", None)
     if rep is not None:
@@ -625,16 +628,13 @@ async def _preview(msg, uid: int, final: bool = False):
         header += f"\nLayout: <b>{_esc(_LAYOUT_NAMES.get(layout, layout))}</b>"
 
     md = (f"# {title}\n\n" if title else "") + body
-    composed = False
+    composed_id = None
     if images and layout.startswith("inside") and richsend.enabled():
-        composed = bool(await richmsg.send_composed(
+        composed_id = await richmsg.send_composed(
             msg.chat_id, md, images, placement=layout,
-            caption=st.get("caption", "")))
-        if composed:
-            # send_composed returns the native message id
-            pass
-    if composed:
-        _keep(uid, composed)
+            caption=st.get("caption", ""))
+    if composed_id:
+        _keep(uid, composed_id)
     elif images and len(images) > 1 and richsend.enabled():
         try:
             _keep(uid, await richmsg.send_slideshow(
@@ -648,7 +648,7 @@ async def _preview(msg, uid: int, final: bool = False):
         except Exception:
             pass
 
-    if md.strip() and layout != "slider_only" and not composed:
+    if md.strip() and layout != "slider_only" and not composed_id:
         mid = await richsend.deliver(msg.chat_id, md,
                                      reply_to=getattr(msg, "message_id", None),
                                      stream=False)
@@ -693,7 +693,10 @@ async def _publish_channel(context, uid: int, chat_id: int) -> str:
         if posted:
             return "✅ Published."
 
-    if images and layout in ("separate_top", "slider_only"):
+    # If an embedded rich message is unsupported on this Telegram layer,
+    # degrade to a separate slider without ever dropping the images.
+    if images and (layout in ("separate_top", "slider_only") or
+                   (layout.startswith("inside") and not posted)):
         if len(images) > 1 and richsend.enabled():
             try:
                 posted = bool(await richmsg.send_slideshow(
@@ -743,6 +746,8 @@ async def _broadcast(context, uid: int, status_msg) -> str:
     body, inline_imgs, title = _parse_draft(st.get("draft", ""))
     images = _all_images(uid, inline_imgs)
     md = (f"# {title}\n\n" if title else "") + body
+    layout = st.get("layout", "inside_top")
+    caption = st.get("caption", "")
     html_fallback = format_ai_answer(md)[:4000] if md.strip() else ""
 
     ids = await db.all_user_ids()
@@ -750,28 +755,47 @@ async def _broadcast(context, uid: int, status_msg) -> str:
     for i, target in enumerate(ids, 1):
         delivered = False
         try:
-            if images:
+            composed = False
+            if images and layout.startswith("inside") and md.strip() and richsend.enabled():
+                composed = bool(await richmsg.send_composed(
+                    target, md, images, placement=layout, caption=caption))
+                delivered = composed
+            if images and not composed and layout in (
+                    "inside_top", "inside_bottom", "separate_top", "slider_only"):
                 sent = False
                 if len(images) > 1 and richsend.enabled():
                     try:
                         sent = bool(await richmsg.send_slideshow(
-                            target, images, caption=title or ""))
+                            target, images, caption=caption or title or ""))
                     except Exception:
                         sent = False
                 if not sent:
                     if len(images) == 1:
                         await context.bot.send_photo(target, images[0],
-                                                     caption=title or None)
+                                                     caption=caption or title or None)
                     else:
                         await context.bot.send_media_group(
                             target, [InputMediaPhoto(u) for u in images])
                 delivered = True
-            if md.strip():
+            if md.strip() and layout != "slider_only" and not composed:
                 mid = await richsend.post(target, md)
                 if not mid:
                     await context.bot.send_message(
                         target, html_fallback, parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True)
+                delivered = True
+            if images and layout == "separate_bottom":
+                sent = False
+                if len(images) > 1 and richsend.enabled():
+                    sent = bool(await richmsg.send_slideshow(
+                        target, images, caption=caption or title or ""))
+                if not sent:
+                    if len(images) == 1:
+                        await context.bot.send_photo(
+                            target, images[0], caption=caption or title or None)
+                    else:
+                        await context.bot.send_media_group(
+                            target, [InputMediaPhoto(u) for u in images])
                 delivered = True
             ok += 1 if delivered else 0
         except Exception as e:
