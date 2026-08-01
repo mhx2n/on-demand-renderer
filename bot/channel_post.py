@@ -972,6 +972,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             result = await _broadcast(context, uid, q.message)
+            await _clear_aux(q.message, uid)
             _STATE.pop(uid, None)
             try:
                 await q.message.reply_text(result, parse_mode=ParseMode.HTML)
@@ -983,11 +984,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("No channel selected.")
             return
         result = await _publish_channel(context, uid, chat_id)
+        await _clear_aux(q.message, uid)
         _STATE.pop(uid, None)
         try:
             await q.edit_message_text(result)
         except Exception:
             await q.message.reply_text(result)
+
 
 
 # -------------------------------------------------------------- text input
