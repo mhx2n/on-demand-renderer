@@ -820,9 +820,9 @@ def _ig_api_media(code: str) -> tuple[Optional[str], list[str], str, str]:
 
 
 def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
-    """Instagram fallback: web API → embed page → public mirrors.
+    """Instagram fallback: cobalt → web API → embed page → public mirrors.
 
-    Handles single videos, single photos, and photo carousels — used whenever
+    Handles reels/videos, single photos, and mixed carousels — used whenever
     yt-dlp's Instagram extractor is blocked (very common from server IPs).
     """
     code = _ig_shortcode(url)
@@ -833,6 +833,32 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
     images: list[str] = []
     title = ""
     uploader = "Instagram"
+
+    # 0) Cobalt — typed media, so a reel is never downgraded to its cover image.
+    try:
+        items = _cobalt_resolve(url, audio_only=audio_only)
+    except Exception:
+        items = []
+    if items:
+        if audio_only:
+            au = next((i["url"] for i in items if i["type"] in {"audio", "video"}), None)
+            if au:
+                video_url = au
+        else:
+            idx = _ig_img_index(url)
+            picked = None
+            if idx and 1 <= idx <= len(items):
+                picked = items[idx - 1]
+            vids = [i for i in items if i["type"] == "video"]
+            if picked and picked["type"] == "video":
+                video_url = picked["url"]
+            elif vids:
+                video_url = vids[0]["url"]
+            elif picked:
+                images = [picked["url"]]
+            else:
+                images = [i["url"] for i in items if i["type"] == "photo"]
+
 
     # 1) Official web API (best quality; honours cookies when configured)
     try:
