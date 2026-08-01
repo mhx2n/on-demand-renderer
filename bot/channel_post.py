@@ -770,12 +770,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "noimg":
-        _st(uid)["images"] = []
+        st = _st(uid)
+        st["images"] = []
+        st["draft"] = "\n".join(
+            l for l in (st.get("draft") or "").splitlines()
+            if not l.strip().lower().startswith("!img "))
         try:
-            await q.edit_message_text("Attached images cleared. Send /post again to re-preview.")
+            await q.edit_message_text("🗑 Images cleared.")
         except Exception:
             pass
+        if st.get("draft"):
+            await _preview(q.message, uid)
         return
+
+    if action == "img":
+        st = _st(uid)
+        st["mode"] = "await_images"
+        sent = await q.message.reply_text(
+            f"🖼 Send the photo(s) now — up to {MAX_IMAGES}. "
+            "You can also paste image URLs (one per line).\n"
+            "When you're done, tap 👁 <b>Final review</b> on the preview "
+            "to see the exact post.",
+            parse_mode=ParseMode.HTML)
+        _track(uid, sent)
+        return
+
+    if action == "review":
+        st = _st(uid)
+        st["mode"] = None
+        if not (st.get("draft") or st.get("images")):
+            await q.message.reply_text("Nothing to review yet.")
+            return
+        await _preview(q.message, uid, final=True)
+        return
+
 
     if action == "regen":
         st = _st(uid)
