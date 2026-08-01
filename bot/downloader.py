@@ -960,9 +960,10 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
     if images and not audio_only:
         paths = []
         for i, iu in enumerate(images[:10]):
-            p = os.path.join(workdir, f"ig_{code}_{i}.jpg")
+            p = os.path.join(workdir, f"ig_{code}_{i}{_media_ext(iu, '.jpg')}")
             if _download_file(iu, p, referer="https://www.instagram.com/", ua=_UA_IOS):
-                paths.append(p)
+                paths.append(_to_jpeg(p))
+
         if paths:
             return {
                 "path": None,
