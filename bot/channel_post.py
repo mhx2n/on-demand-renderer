@@ -903,6 +903,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "to see the exact post.",
             parse_mode=ParseMode.HTML)
         _track(uid, sent)
+        _aux(uid, sent)
         return
 
     if action == "layout":
@@ -912,13 +913,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"cp:setlayout:{key}")]
             for key, label in _LAYOUT_NAMES.items()]
         rows.append([InlineKeyboardButton("Back", callback_data="cp:review:1")])
-        await q.message.reply_text(
+        sent = await q.message.reply_text(
             "Choose where the image slider appears:",
             reply_markup=InlineKeyboardMarkup(rows))
+        _aux(uid, sent)
         return
 
     if action == "setlayout":
         _st(uid)["layout"] = arg if arg in _LAYOUT_NAMES else "inside_top"
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         await _preview(q.message, uid, final=True)
         return
 
@@ -929,6 +935,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "the caption you want. Send <code>-</code> to remove it.",
             parse_mode=ParseMode.HTML)
         _track(uid, sent)
+        _aux(uid, sent)
         return
 
     if action == "review":
@@ -948,7 +955,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "What should I change? Send the instruction "
             "(e.g. “shorter”, “বাংলায় লেখো”, “add a comparison table”).")
         _track(uid, sent)
+        _aux(uid, sent)
         return
+
 
     if action == "go":
         st = _st(uid)
