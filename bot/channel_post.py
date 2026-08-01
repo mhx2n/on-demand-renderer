@@ -126,6 +126,12 @@ def _st(uid: int) -> dict:
     st.setdefault("ctrl_ids", set())
     st.setdefault("layout", "inside_top")
     st.setdefault("caption", "")
+    st.setdefault("aux_ids", [])
+    if st.get("photo_lock") is None:
+        try:
+            st["photo_lock"] = asyncio.Lock()
+        except Exception:
+            st["photo_lock"] = None
     return st
 
 
@@ -147,6 +153,36 @@ def _track(uid: int, message) -> None:
     ids.add(getattr(message, "message_id", 0))
     if len(ids) > 20:
         st["ctrl_ids"] = set(sorted(ids)[-20:])
+
+
+def _aux(uid: int, message) -> None:
+    """Remember a transient helper message so it can be swept away later."""
+    mid = getattr(message, "message_id", None)
+    if not mid:
+        return
+    _st(uid).setdefault("aux_ids", []).append(int(mid))
+
+
+async def _clear_aux(msg, uid: int) -> None:
+    """Delete every transient prompt/status message of this composer turn."""
+    st = _st(uid)
+    ids = list(dict.fromkeys(st.get("aux_ids") or []))
+    st["aux_ids"] = []
+    note = st.get("img_note_id")
+    if note:
+        ids.append(int(note))
+    st["img_note_id"] = None
+    try:
+        bot = msg.get_bot()
+    except Exception:
+        return
+    for mid in ids:
+        try:
+            await bot.delete_message(msg.chat_id, mid)
+        except Exception:
+            pass
+        st.get("ctrl_ids", set()).discard(mid)
+
 
 
 def _parse_draft(text: str) -> tuple[str, list[str], str | None]:
@@ -606,7 +642,9 @@ async def _preview(msg, uid: int, final: bool = False):
         return
 
     # Clean slate: every regeneration replaces the old preview entirely.
+    await _clear_aux(msg, uid)
     await _wipe_preview(msg, uid)
+
 
     layout = st.get("layout", "inside_top")
     kb = InlineKeyboardMarkup([
@@ -825,12 +863,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, action, arg = (data.split(":", 2) + ["", ""])[:3]
 
     if action == "cancel":
+        await _clear_aux(q.message, uid)
         _STATE.pop(uid, None)
         try:
             await q.edit_message_text("Cancelled.")
         except Exception:
             pass
         return
+
 
     if action == "ch":
         _st(uid)["chat_id"] = int(arg)
@@ -865,6 +905,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "to see the exact post.",
             parse_mode=ParseMode.HTML)
         _track(uid, sent)
+        _aux(uid, sent)
         return
 
     if action == "layout":
@@ -874,13 +915,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             callback_data=f"cp:setlayout:{key}")]
             for key, label in _LAYOUT_NAMES.items()]
         rows.append([InlineKeyboardButton("Back", callback_data="cp:review:1")])
-        await q.message.reply_text(
+        sent = await q.message.reply_text(
             "Choose where the image slider appears:",
             reply_markup=InlineKeyboardMarkup(rows))
+        _aux(uid, sent)
         return
 
     if action == "setlayout":
         _st(uid)["layout"] = arg if arg in _LAYOUT_NAMES else "inside_top"
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
         await _preview(q.message, uid, final=True)
         return
 
@@ -891,6 +937,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "the caption you want. Send <code>-</code> to remove it.",
             parse_mode=ParseMode.HTML)
         _track(uid, sent)
+        _aux(uid, sent)
         return
 
     if action == "review":
@@ -910,7 +957,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "What should I change? Send the instruction "
             "(e.g. “shorter”, “বাংলায় লেখো”, “add a comparison table”).")
         _track(uid, sent)
+        _aux(uid, sent)
         return
+
 
     if action == "go":
         st = _st(uid)
@@ -923,6 +972,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             result = await _broadcast(context, uid, q.message)
+            await _clear_aux(q.message, uid)
             _STATE.pop(uid, None)
             try:
                 await q.message.reply_text(result, parse_mode=ParseMode.HTML)
@@ -934,11 +984,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text("No channel selected.")
             return
         result = await _publish_channel(context, uid, chat_id)
+        await _clear_aux(q.message, uid)
         _STATE.pop(uid, None)
         try:
             await q.edit_message_text(result)
         except Exception:
             await q.message.reply_text(result)
+
 
 
 # -------------------------------------------------------------- text input
@@ -1028,41 +1080,56 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not (st.get("mode") or st.get("draft")):
         return
+    st = _st(uid)
     data = await _photo_bytes(context, msg)
     if not data:
         return
-    st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [data]
-    caption = (msg.caption or "").strip()
-    if caption and not st.get("draft"):
-        st["draft"] = caption
-        st["mode"] = None
 
-    # One single, silently-updated status line — never one message per photo.
-    note = (
-        f"🖼 <b>{len(st['images'])}</b> image(s) attached"
-        + ("  ·  2+ become a native slider" if len(st["images"]) > 1 else "")
-        + ("\nTap ♻️ Regenerate, or reply to the preview to keep editing."
-           if st.get("draft") else "\nSend the post text, or /post to preview.")
-    )
-    mid = st.get("img_note_id")
-    edited = False
-    if mid:
-        try:
-            await context.bot.edit_message_text(
-                note, chat_id=msg.chat_id, message_id=mid, parse_mode=ParseMode.HTML)
-            edited = True
-        except Exception:
-            edited = False
-    if not edited:
-        sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
-        st["img_note_id"] = getattr(sent, "message_id", None)
-        _track(uid, sent)
+    lock = st.get("photo_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        st["photo_lock"] = lock
+    # Album bursts arrive concurrently — serialize so exactly ONE status
+    # message exists and it is edited in place, never duplicated.
+    async with lock:
+        st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [data]
+        caption = (msg.caption or "").strip()
+        if caption and not st.get("draft"):
+            st["draft"] = caption
+            st["mode"] = None
 
-    # Debounced auto refresh: after the last photo of a burst, rebuild a clean
-    # final review so the user sees exactly what will be published.
-    if st.get("draft"):
-        _schedule_review(msg, uid)
+        note = (
+            f"🖼 <b>{len(st['images'])}</b> image(s) attached"
+            + ("  ·  2+ become a native slider" if len(st["images"]) > 1 else "")
+            + ("\nBuilding the final review…"
+               if st.get("draft") else "\nSend the post text, or /post to preview.")
+        )
+        mid = st.get("img_note_id")
+        edited = False
+        if mid:
+            try:
+                await context.bot.edit_message_text(
+                    note, chat_id=msg.chat_id, message_id=mid,
+                    parse_mode=ParseMode.HTML)
+                edited = True
+            except Exception:
+                edited = False
+        if not edited:
+            try:
+                sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
+            except Exception:
+                sent = None
+            if sent is not None:
+                st["img_note_id"] = getattr(sent, "message_id", None)
+                _track(uid, sent)
+                _aux(uid, sent)
+
+        # Debounced auto refresh: after the last photo of a burst, rebuild a
+        # clean final review so the user sees exactly what will be published.
+        if st.get("draft"):
+            _schedule_review(msg, uid)
     raise ApplicationHandlerStop
+
 
 
 def _schedule_review(msg, uid: int, delay: float = 2.5) -> None:
