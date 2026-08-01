@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
 from .config import MONGODB_URI, MONGODB_DB
 
@@ -105,7 +104,7 @@ async def restore_to_sqlite():
     from .config import DB_PATH
 
     restored = {"settings": 0, "custom_providers": 0, "speak_grants": 0,
-                "groups": 0, "users": 0}
+                "groups": 0, "users": 0, "channels": 0}
     try:
         async with aiosqlite.connect(DB_PATH) as sdb:
             # settings
@@ -174,6 +173,22 @@ async def restore_to_sqlite():
                          int(row.get("is_banned", 0)), int(row.get("msg_count", 0))),
                     )
                     restored["users"] += 1
+            # channels
+            c = _coll("channels")
+            if c is not None:
+                async for row in c.find({}):
+                    await sdb.execute(
+                        """INSERT INTO channels(chat_id, owner_user_id, title, username, added_at)
+                           VALUES(?,?,?,?,?)
+                           ON CONFLICT(chat_id) DO UPDATE SET
+                               owner_user_id=excluded.owner_user_id,
+                               title=excluded.title, username=excluded.username,
+                               added_at=excluded.added_at""",
+                        (int(row.get("_id")), int(row.get("owner_user_id", 0)),
+                         row.get("title", ""), row.get("username", ""),
+                         int(row.get("added_at", 0))),
+                    )
+                    restored["channels"] += 1
             await sdb.commit()
         log.info("Restored from MongoDB: %s", restored)
     except Exception as e:
