@@ -411,6 +411,7 @@ async def remove_channel(chat_id: int, owner_user_id: int | None = None):
                 (int(chat_id), int(owner_user_id)),
             )
         await db.commit()
+    mongo.fire(mongo.delete("channels", {"_id": int(chat_id)}))
 
 
 async def list_channels(owner_user_id: int | None = None):
