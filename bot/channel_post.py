@@ -943,7 +943,35 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
         st["img_note_id"] = getattr(sent, "message_id", None)
         _track(uid, sent)
+
+    # Debounced auto refresh: after the last photo of a burst, rebuild a clean
+    # final review so the user sees exactly what will be published.
+    if st.get("draft"):
+        _schedule_review(msg, uid)
     raise ApplicationHandlerStop
+
+
+def _schedule_review(msg, uid: int, delay: float = 2.5) -> None:
+    st = _st(uid)
+    task = st.get("review_task")
+    if task is not None and not task.done():
+        task.cancel()
+
+    async def _run():
+        try:
+            await asyncio.sleep(delay)
+            st["mode"] = None
+            await _preview(msg, uid, final=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.debug("auto review failed: %s", e)
+
+    try:
+        st["review_task"] = asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass
+
 
 
 
