@@ -578,7 +578,7 @@ def _keep(uid: int, mid) -> None:
     _st(uid).setdefault("preview_ids", []).append(int(mid))
 
 
-async def _preview(msg, uid: int):
+async def _preview(msg, uid: int, final: bool = False):
     st = _st(uid)
     body, inline_imgs, title = _parse_draft(st.get("draft", ""))
     images = _all_images(uid, inline_imgs)
@@ -596,13 +596,17 @@ async def _preview(msg, uid: int):
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
          InlineKeyboardButton("♻️ Regenerate", callback_data="cp:regen:1")],
+        [InlineKeyboardButton("🖼 Add images", callback_data="cp:img:1"),
+         InlineKeyboardButton("👁 Final review", callback_data="cp:review:1")],
         [InlineKeyboardButton("🗑 Clear images", callback_data="cp:noimg:1"),
          InlineKeyboardButton("✖ Cancel", callback_data="cp:cancel:0")],
     ])
     name = await _target_name(uid)
-    header = f"<b>Preview → {_esc(name)}</b>"
+    label = "Final review" if final else "Preview"
+    header = f"<b>{label} → {_esc(name)}</b>"
     if images:
-        header += f"  ·  {len(images)} image(s)"
+        header += (f"  ·  {len(images)} image(s)"
+                   + ("  ·  slider" if len(images) > 1 else ""))
 
     md = (f"# {title}\n\n" if title else "") + body
     if images and len(images) > 1 and richsend.enabled():
@@ -629,13 +633,18 @@ async def _preview(msg, uid: int):
                 disable_web_page_preview=True)
             _keep(uid, getattr(sent, "message_id", None))
 
-    ctrl = await msg.reply_text(
-        header + "\n\nPublish this post?\n"
-        "<i>Reply to this message with instructions to rewrite it "
-        "(shorten, translate, add/remove sections…).</i>",
-        parse_mode=ParseMode.HTML, reply_markup=kb)
+    if final:
+        note = ("\n\nThis is exactly how the post will look in "
+                f"<b>{_esc(name)}</b>. Publish it?")
+    else:
+        note = ("\n\nPublish this post?\n"
+                "<i>Reply to this message with instructions to rewrite it "
+                "(shorten, translate, add/remove sections…), or tap 🖼 Add images.</i>")
+    ctrl = await msg.reply_text(header + note,
+                                parse_mode=ParseMode.HTML, reply_markup=kb)
     _track(uid, ctrl)
     _keep(uid, getattr(ctrl, "message_id", None))
+
 
 
 
@@ -761,12 +770,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action == "noimg":
-        _st(uid)["images"] = []
+        st = _st(uid)
+        st["images"] = []
+        st["draft"] = "\n".join(
+            l for l in (st.get("draft") or "").splitlines()
+            if not l.strip().lower().startswith("!img "))
         try:
-            await q.edit_message_text("Attached images cleared. Send /post again to re-preview.")
+            await q.edit_message_text("🗑 Images cleared.")
         except Exception:
             pass
+        if st.get("draft"):
+            await _preview(q.message, uid)
         return
+
+    if action == "img":
+        st = _st(uid)
+        st["mode"] = "await_images"
+        sent = await q.message.reply_text(
+            f"🖼 Send the photo(s) now — up to {MAX_IMAGES}. "
+            "You can also paste image URLs (one per line).\n"
+            "When you're done, tap 👁 <b>Final review</b> on the preview "
+            "to see the exact post.",
+            parse_mode=ParseMode.HTML)
+        _track(uid, sent)
+        return
+
+    if action == "review":
+        st = _st(uid)
+        st["mode"] = None
+        if not (st.get("draft") or st.get("images")):
+            await q.message.reply_text("Nothing to review yet.")
+            return
+        await _preview(q.message, uid, final=True)
+        return
+
 
     if action == "regen":
         st = _st(uid)
@@ -847,11 +884,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _regenerate(msg, uid, text)
         raise ApplicationHandlerStop
 
+    if mode == "await_images":
+        urls = [u for u in re.findall(r"https?://\S+", text)
+                if u not in (st.get("images") or [])]
+        if urls:
+            st["images"] = ((st.get("images") or []) + urls)[:MAX_IMAGES]
+            st["mode"] = None
+            await _preview(msg, uid, final=True)
+        else:
+            await msg.reply_text("Send photos, or paste image URLs (http…).")
+        raise ApplicationHandlerStop
 
     # Conversational refine: reply to the preview / control message
     if replying_to_bot and st.get("draft"):
         await _regenerate(msg, uid, text)
         raise ApplicationHandlerStop
+
 
 
 
@@ -895,7 +943,35 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
         st["img_note_id"] = getattr(sent, "message_id", None)
         _track(uid, sent)
+
+    # Debounced auto refresh: after the last photo of a burst, rebuild a clean
+    # final review so the user sees exactly what will be published.
+    if st.get("draft"):
+        _schedule_review(msg, uid)
     raise ApplicationHandlerStop
+
+
+def _schedule_review(msg, uid: int, delay: float = 2.5) -> None:
+    st = _st(uid)
+    task = st.get("review_task")
+    if task is not None and not task.done():
+        task.cancel()
+
+    async def _run():
+        try:
+            await asyncio.sleep(delay)
+            st["mode"] = None
+            await _preview(msg, uid, final=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.debug("auto review failed: %s", e)
+
+    try:
+        st["review_task"] = asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass
+
 
 
 

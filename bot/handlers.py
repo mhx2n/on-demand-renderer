@@ -24,6 +24,7 @@ from telegram import MessageEntity
 
 from . import db
 from . import channel_post as _channel_post, downloader
+from . import backup as _backup
 from . import richmsg, richsend
 from .config import OWNER_ID, FORCE_JOIN_CHANNEL
 
@@ -3122,6 +3123,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "addimg": _channel_post.cmd_addimg,
             "clearimg": _channel_post.cmd_clearimg,
             "richcast": _channel_post.cmd_richcast,
+            "backup": _backup.cmd_backup,
 
         }
         if cmd in alias:
@@ -3213,6 +3215,7 @@ OWNER_EXTRA = [
     BotCommand("owner",      "Owner panel"),
     BotCommand("stats",      "Bot statistics"),
     BotCommand("logs",       "Recent logs"),
+    BotCommand("backup",     "MongoDB backup console"),
     BotCommand("users",      "Active user count"),
     BotCommand("announce",   "Broadcast to all users"),
     BotCommand("richcast",   "Rich broadcast studio (AI + images)"),
@@ -3567,6 +3570,7 @@ def register_handlers(app: Application):
     _ocr.register(app)
     _guest.register(app)
     _channel_post.register(app)
+    _backup.register(app)
 
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(InlineQueryHandler(on_inline_query))
