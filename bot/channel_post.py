@@ -119,11 +119,23 @@ def _st(uid: int) -> dict:
     st = _STATE.get(uid)
     if st is None:
         st = {"mode": None, "target": None, "chat_id": None, "draft": "",
-              "images": [], "ctrl_ids": set(), "busy": False}
+              "images": [], "ctrl_ids": set(), "busy": False,
+              "layout": "inside_top", "caption": ""}
         _STATE[uid] = st
     st.setdefault("images", [])
     st.setdefault("ctrl_ids", set())
+    st.setdefault("layout", "inside_top")
+    st.setdefault("caption", "")
     return st
+
+
+_LAYOUT_NAMES = {
+    "inside_top": "Inside · images first",
+    "inside_bottom": "Inside · images last",
+    "separate_top": "Separate · images first",
+    "separate_bottom": "Separate · images last",
+    "slider_only": "Slider only",
+}
 
 
 def _track(uid: int, message) -> None:
@@ -593,11 +605,14 @@ async def _preview(msg, uid: int, final: bool = False):
     # Clean slate: every regeneration replaces the old preview entirely.
     await _wipe_preview(msg, uid)
 
+    layout = st.get("layout", "inside_top")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Publish", callback_data="cp:go:1"),
          InlineKeyboardButton("♻️ Regenerate", callback_data="cp:regen:1")],
         [InlineKeyboardButton("🖼 Add images", callback_data="cp:img:1"),
          InlineKeyboardButton("👁 Final review", callback_data="cp:review:1")],
+        [InlineKeyboardButton("↕️ Image placement", callback_data="cp:layout:1"),
+         InlineKeyboardButton("✍️ Slider caption", callback_data="cp:caption:1")],
         [InlineKeyboardButton("🗑 Clear images", callback_data="cp:noimg:1"),
          InlineKeyboardButton("✖ Cancel", callback_data="cp:cancel:0")],
     ])
@@ -607,11 +622,23 @@ async def _preview(msg, uid: int, final: bool = False):
     if images:
         header += (f"  ·  {len(images)} image(s)"
                    + ("  ·  slider" if len(images) > 1 else ""))
+        header += f"\nLayout: <b>{_esc(_LAYOUT_NAMES.get(layout, layout))}</b>"
 
     md = (f"# {title}\n\n" if title else "") + body
-    if images and len(images) > 1 and richsend.enabled():
+    composed = False
+    if images and layout.startswith("inside") and richsend.enabled():
+        composed = bool(await richmsg.send_composed(
+            msg.chat_id, md, images, placement=layout,
+            caption=st.get("caption", "")))
+        if composed:
+            # send_composed returns the native message id
+            pass
+    if composed:
+        _keep(uid, composed)
+    elif images and len(images) > 1 and richsend.enabled():
         try:
-            _keep(uid, await richmsg.send_slideshow(msg.chat_id, images, caption=title or ""))
+            _keep(uid, await richmsg.send_slideshow(
+                msg.chat_id, images, caption=st.get("caption") or title or ""))
         except Exception:
             pass
     elif images:
@@ -621,7 +648,7 @@ async def _preview(msg, uid: int, final: bool = False):
         except Exception:
             pass
 
-    if md.strip():
+    if md.strip() and layout != "slider_only" and not composed:
         mid = await richsend.deliver(msg.chat_id, md,
                                      reply_to=getattr(msg, "message_id", None),
                                      stream=False)
@@ -656,19 +683,27 @@ async def _publish_channel(context, uid: int, chat_id: int) -> str:
         return "I'm no longer an administrator in that channel."
 
     md = (f"# {title}\n\n" if title else "") + body
+    layout = st.get("layout", "inside_top")
+    caption = st.get("caption", "")
     posted = False
 
-    if images:
+    if images and layout.startswith("inside") and md.strip() and richsend.enabled():
+        posted = bool(await richmsg.send_composed(
+            chat_id, md, images, placement=layout, caption=caption))
+        if posted:
+            return "✅ Published."
+
+    if images and layout in ("separate_top", "slider_only"):
         if len(images) > 1 and richsend.enabled():
             try:
                 posted = bool(await richmsg.send_slideshow(
-                    chat_id, images, caption=title or ""))
+                    chat_id, images, caption=caption or title or ""))
             except Exception:
                 posted = False
         if not posted:
             try:
                 if len(images) == 1:
-                    await context.bot.send_photo(chat_id, images[0], caption=title or None)
+                    await context.bot.send_photo(chat_id, images[0], caption=caption or title or None)
                 else:
                     await context.bot.send_media_group(
                         chat_id, [InputMediaPhoto(u) for u in images])
@@ -676,7 +711,7 @@ async def _publish_channel(context, uid: int, chat_id: int) -> str:
             except Exception as e:
                 log.debug("channel images failed: %s", e)
 
-    if md.strip():
+    if md.strip() and layout != "slider_only":
         mid = await richsend.post(chat_id, md)
         if not mid:
             try:
@@ -685,6 +720,19 @@ async def _publish_channel(context, uid: int, chat_id: int) -> str:
                     disable_web_page_preview=False)
             except Exception:
                 await context.bot.send_message(chat_id, clean_text(md)[:4000])
+        posted = True
+
+    if images and layout == "separate_bottom":
+        slider_sent = False
+        if len(images) > 1 and richsend.enabled():
+            slider_sent = bool(await richmsg.send_slideshow(
+                chat_id, images, caption=caption or title or ""))
+        if not slider_sent:
+            if len(images) == 1:
+                await context.bot.send_photo(chat_id, images[0], caption=caption or title or None)
+            else:
+                await context.bot.send_media_group(
+                    chat_id, [InputMediaPhoto(u) for u in images])
         posted = True
 
     return "✅ Published." if posted else "Nothing was posted."
@@ -795,6 +843,32 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _track(uid, sent)
         return
 
+    if action == "layout":
+        st = _st(uid)
+        rows = [[InlineKeyboardButton(
+            ("✓ " if st.get("layout") == key else "") + label,
+            callback_data=f"cp:setlayout:{key}")]
+            for key, label in _LAYOUT_NAMES.items()]
+        rows.append([InlineKeyboardButton("Back", callback_data="cp:review:1")])
+        await q.message.reply_text(
+            "Choose where the image slider appears:",
+            reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if action == "setlayout":
+        _st(uid)["layout"] = arg if arg in _LAYOUT_NAMES else "inside_top"
+        await _preview(q.message, uid, final=True)
+        return
+
+    if action == "caption":
+        _st(uid)["mode"] = "await_caption"
+        sent = await q.message.reply_text(
+            "Send your slider caption, or start with <code>AI:</code> and describe "
+            "the caption you want. Send <code>-</code> to remove it.",
+            parse_mode=ParseMode.HTML)
+        _track(uid, sent)
+        return
+
     if action == "review":
         st = _st(uid)
         st["mode"] = None
@@ -882,6 +956,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mode == "await_instruction":
         st["mode"] = None
         await _regenerate(msg, uid, text)
+        raise ApplicationHandlerStop
+
+    if mode == "await_caption":
+        st["mode"] = None
+        if text == "-":
+            st["caption"] = ""
+        elif text.lower().startswith("ai:"):
+            instruction = text.split(":", 1)[1].strip()
+            generated = await _ai(
+                "Write one concise, professional image-slider caption only. "
+                "No heading and no commentary. Request: " + instruction +
+                "\nPost context:\n" + (st.get("draft") or ""))
+            st["caption"] = (generated or instruction).strip()
+        else:
+            st["caption"] = text
+        await _preview(msg, uid, final=True)
         raise ApplicationHandlerStop
 
     if mode == "await_images":

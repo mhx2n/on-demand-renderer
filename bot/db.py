@@ -1,7 +1,10 @@
 import aiosqlite
 import time
+import logging
 from .config import DB_PATH
 from . import mongo
+
+log = logging.getLogger("db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
