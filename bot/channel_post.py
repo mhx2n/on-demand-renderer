@@ -1075,41 +1075,56 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not (st.get("mode") or st.get("draft")):
         return
+    st = _st(uid)
     data = await _photo_bytes(context, msg)
     if not data:
         return
-    st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [data]
-    caption = (msg.caption or "").strip()
-    if caption and not st.get("draft"):
-        st["draft"] = caption
-        st["mode"] = None
 
-    # One single, silently-updated status line — never one message per photo.
-    note = (
-        f"🖼 <b>{len(st['images'])}</b> image(s) attached"
-        + ("  ·  2+ become a native slider" if len(st["images"]) > 1 else "")
-        + ("\nTap ♻️ Regenerate, or reply to the preview to keep editing."
-           if st.get("draft") else "\nSend the post text, or /post to preview.")
-    )
-    mid = st.get("img_note_id")
-    edited = False
-    if mid:
-        try:
-            await context.bot.edit_message_text(
-                note, chat_id=msg.chat_id, message_id=mid, parse_mode=ParseMode.HTML)
-            edited = True
-        except Exception:
-            edited = False
-    if not edited:
-        sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
-        st["img_note_id"] = getattr(sent, "message_id", None)
-        _track(uid, sent)
+    lock = st.get("photo_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        st["photo_lock"] = lock
+    # Album bursts arrive concurrently — serialize so exactly ONE status
+    # message exists and it is edited in place, never duplicated.
+    async with lock:
+        st["images"] = (st.get("images") or [])[:MAX_IMAGES - 1] + [data]
+        caption = (msg.caption or "").strip()
+        if caption and not st.get("draft"):
+            st["draft"] = caption
+            st["mode"] = None
 
-    # Debounced auto refresh: after the last photo of a burst, rebuild a clean
-    # final review so the user sees exactly what will be published.
-    if st.get("draft"):
-        _schedule_review(msg, uid)
+        note = (
+            f"🖼 <b>{len(st['images'])}</b> image(s) attached"
+            + ("  ·  2+ become a native slider" if len(st["images"]) > 1 else "")
+            + ("\nBuilding the final review…"
+               if st.get("draft") else "\nSend the post text, or /post to preview.")
+        )
+        mid = st.get("img_note_id")
+        edited = False
+        if mid:
+            try:
+                await context.bot.edit_message_text(
+                    note, chat_id=msg.chat_id, message_id=mid,
+                    parse_mode=ParseMode.HTML)
+                edited = True
+            except Exception:
+                edited = False
+        if not edited:
+            try:
+                sent = await msg.reply_text(note, parse_mode=ParseMode.HTML)
+            except Exception:
+                sent = None
+            if sent is not None:
+                st["img_note_id"] = getattr(sent, "message_id", None)
+                _track(uid, sent)
+                _aux(uid, sent)
+
+        # Debounced auto refresh: after the last photo of a burst, rebuild a
+        # clean final review so the user sees exactly what will be published.
+        if st.get("draft"):
+            _schedule_review(msg, uid)
     raise ApplicationHandlerStop
+
 
 
 def _schedule_review(msg, uid: int, delay: float = 2.5) -> None:
