@@ -884,11 +884,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _regenerate(msg, uid, text)
         raise ApplicationHandlerStop
 
+    if mode == "await_images":
+        urls = [u for u in re.findall(r"https?://\S+", text)
+                if u not in (st.get("images") or [])]
+        if urls:
+            st["images"] = ((st.get("images") or []) + urls)[:MAX_IMAGES]
+            st["mode"] = None
+            await _preview(msg, uid, final=True)
+        else:
+            await msg.reply_text("Send photos, or paste image URLs (http…).")
+        raise ApplicationHandlerStop
 
     # Conversational refine: reply to the preview / control message
     if replying_to_bot and st.get("draft"):
         await _regenerate(msg, uid, text)
         raise ApplicationHandlerStop
+
 
 
 
