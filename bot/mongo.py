@@ -178,3 +178,102 @@ async def restore_to_sqlite():
         log.info("Restored from MongoDB: %s", restored)
     except Exception as e:
         log.warning("Mongo restore failed: %s", e)
+
+# ---------- backup console helpers (owner) ----------
+MIRRORED = ("settings", "custom_providers", "speak_grants", "groups",
+            "users", "channels")
+FREE_TIER_BYTES = 512 * 1024 * 1024
+
+
+async def collection_counts() -> dict:
+    """{collection: document count} for every mirrored collection."""
+    out: dict[str, int] = {}
+    if not _enabled:
+        return out
+    for name in MIRRORED:
+        c = _coll(name)
+        if c is None:
+            continue
+        try:
+            out[name] = await c.count_documents({})
+        except Exception as e:
+            log.warning("count failed for %s: %s", name, e)
+            out[name] = -1
+    return out
+
+
+async def db_stats() -> dict:
+    """Storage usage for the mirror database."""
+    if not _enabled or _dbh is None:
+        return {}
+    try:
+        s = await _dbh.command("dbStats")
+        data = int(s.get("dataSize") or 0)
+        storage = int(s.get("storageSize") or 0)
+        index = int(s.get("indexSize") or 0)
+        used = storage + index
+        return {
+            "db": MONGODB_DB,
+            "collections": int(s.get("collections") or 0),
+            "objects": int(s.get("objects") or 0),
+            "data_size": data,
+            "storage_size": storage,
+            "index_size": index,
+            "used": used,
+            "quota": FREE_TIER_BYTES,
+            "free": max(0, FREE_TIER_BYTES - used),
+        }
+    except Exception as e:
+        log.warning("dbStats failed: %s", e)
+        return {}
+
+
+async def export_all() -> dict:
+    """Full JSON-serialisable dump of every mirrored collection."""
+    out: dict[str, list] = {}
+    if not _enabled:
+        return out
+    for name in MIRRORED:
+        c = _coll(name)
+        if c is None:
+            continue
+        rows = []
+        try:
+            async for row in c.find({}):
+                rows.append({k: (str(v) if not isinstance(
+                    v, (int, float, str, bool, type(None), list, dict)) else v)
+                    for k, v in row.items()})
+        except Exception as e:
+            log.warning("export failed for %s: %s", name, e)
+        out[name] = rows
+    return out
+
+
+async def wipe(collections: list[str] | None = None) -> dict:
+    """Delete every document from the given (default: all) collections."""
+    out: dict[str, int] = {}
+    if not _enabled:
+        return out
+    for name in (collections or list(MIRRORED)):
+        c = _coll(name)
+        if c is None:
+            continue
+        try:
+            res = await c.delete_many({})
+            out[name] = int(getattr(res, "deleted_count", 0))
+        except Exception as e:
+            log.warning("wipe failed for %s: %s", name, e)
+            out[name] = -1
+    return out
+
+
+async def recent_users(limit: int = 10) -> list[dict]:
+    c = _coll("users")
+    if c is None:
+        return []
+    try:
+        cur = c.find({}).sort("last_seen", -1).limit(int(limit))
+        return [r async for r in cur]
+    except Exception as e:
+        log.warning("recent_users failed: %s", e)
+        return []
