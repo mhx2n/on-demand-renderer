@@ -1273,6 +1273,10 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
                         if os.path.exists(p) and _is_image(p):
                             pics.append(p)
                     if pics and not audio_only:
+                        if platform == "facebook" and len(pics) < 2:
+                            extra = _fb_download_images(url, workdir)
+                            if len(extra) > len(pics):
+                                pics = extra
                         return {
                             "path": None,
                             "images": pics[:10],
@@ -1297,18 +1301,26 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
                 if not os.path.exists(path):
                     raise RuntimeError("Downloaded file vanished.")
                 if _is_image(path) and not audio_only:
+                    pics = [path]
+                    if platform == "facebook":
+                        # yt-dlp only ever yields the cover photo of an album —
+                        # scrape the post itself so carousels stay carousels.
+                        extra = _fb_download_images(url, workdir)
+                        if len(extra) > 1:
+                            pics = extra
                     return {
                         "path": None,
-                        "images": [path],
-                        "size": os.path.getsize(path),
+                        "images": pics[:10],
+                        "size": sum(os.path.getsize(p) for p in pics[:10]),
                         "title": (info.get("title") or "")[:200],
                         "uploader": info.get("uploader") or info.get("channel") or "",
                         "duration": 0,
-                        "ext": os.path.splitext(path)[1].lstrip("."),
+                        "ext": os.path.splitext(pics[0])[1].lstrip(".") or "jpg",
                         "thumbnail": info.get("thumbnail"),
                         "webpage_url": info.get("webpage_url") or url,
                         "audio_only": False,
                     }
+
                 path = _ensure_telegram_media(path, audio_only=audio_only)
 
                 size = os.path.getsize(path)
