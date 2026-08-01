@@ -861,18 +861,21 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
 
 
     # 1) Official web API (best quality; honours cookies when configured)
-    try:
-        v, imgs, t, u = _ig_api_media(code)
-        if t:
-            title = t
-        if u:
-            uploader = u
-        if v:
-            video_url = v
-        elif imgs and not audio_only:
-            images = imgs
-    except Exception:
-        pass
+    if not video_url and not images:
+        try:
+            v, imgs, t, u = _ig_api_media(code)
+            if t:
+                title = t
+            if u:
+                uploader = u
+            if v:
+                video_url = v
+            elif imgs and not audio_only:
+                idx = _ig_img_index(url)
+                images = [imgs[idx - 1]] if idx and 1 <= idx <= len(imgs) else imgs
+        except Exception:
+            pass
+
 
     # 2) HTML scraping of embed pages / public mirrors
     if not video_url and not images:
