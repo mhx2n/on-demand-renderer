@@ -1,10 +1,7 @@
 import aiosqlite
 import time
-import logging
 from .config import DB_PATH
 from . import mongo
-
-log = logging.getLogger("db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -407,8 +404,10 @@ async def add_channel(chat_id: int, owner_user_id: int, title: str = "", usernam
                 "owner_user_id": int(owner_user_id), "title": title or "",
                 "username": username or "", "added_at": added_at,
             })
-        except Exception as exc:
-            log.warning("channel mirror write failed for %s: %s", chat_id, exc)
+        except Exception:
+            # SQLite remains usable; startup restoration will retry on the
+            # next successful registration update.
+            pass
 
 
 async def remove_channel(chat_id: int, owner_user_id: int | None = None):
@@ -428,8 +427,8 @@ async def remove_channel(chat_id: int, owner_user_id: int | None = None):
     if removed and mongo.enabled():
         try:
             await mongo.delete("channels", {"_id": int(chat_id)})
-        except Exception as exc:
-            log.warning("channel mirror delete failed for %s: %s", chat_id, exc)
+        except Exception:
+            pass
 
 
 async def list_channels(owner_user_id: int | None = None):
