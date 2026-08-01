@@ -267,7 +267,7 @@ def _probe_media(path: str) -> dict:
         [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=codec_name,width,height,pix_fmt",
+            "-show_entries", "stream=codec_name,width,height,pix_fmt:format=duration",
             "-of", "default=noprint_wrappers=1:nokey=0",
             path,
         ],
@@ -286,6 +286,11 @@ def _probe_media(path: str) -> dict:
         if k in {"width", "height"}:
             try:
                 data[k] = int(v)
+            except Exception:
+                pass
+        elif k == "duration":
+            try:
+                data[k] = max(0, int(float(v) + 0.5))
             except Exception:
                 pass
         else:
@@ -845,19 +850,15 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
             if au:
                 video_url = au
         else:
-            idx = _ig_img_index(url)
-            picked = None
-            if idx and 1 <= idx <= len(items):
-                picked = items[idx - 1]
             vids = [i for i in items if i["type"] == "video"]
-            if picked and picked["type"] == "video":
-                video_url = picked["url"]
-            elif vids:
+            photos = [i["url"] for i in items if i["type"] == "photo"]
+            if vids:
                 video_url = vids[0]["url"]
-            elif picked:
-                images = [picked["url"]]
             else:
-                images = [i["url"] for i in items if i["type"] == "photo"]
+                # A post URL can contain ?img_index=N simply because it was
+                # copied while that slide was open. Download the complete
+                # carousel so Telegram can render it as one album/slider.
+                images = photos
 
 
     # 1) Official web API (best quality; honours cookies when configured)
@@ -871,8 +872,7 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
             if v:
                 video_url = v
             elif imgs and not audio_only:
-                idx = _ig_img_index(url)
-                images = [imgs[idx - 1]] if idx and 1 <= idx <= len(imgs) else imgs
+                images = imgs
         except Exception:
             pass
 
@@ -941,14 +941,16 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
                     path = _ensure_telegram_media(path, audio_only=False)
                     size = os.path.getsize(path)
                 except Exception:
-                    pass
+                    return None
             meta = _probe_media(path) if not audio_only else {}
+            if not audio_only and not meta.get("duration"):
+                return None
             return {
                 "path": path,
                 "size": size,
                 "title": title or "Instagram",
                 "uploader": uploader,
-                "duration": 0,
+                "duration": meta.get("duration") or 0,
                 "ext": os.path.splitext(path)[1].lstrip(".") or "mp4",
                 "width": meta.get("width") or 0,
                 "height": meta.get("height") or 0,
