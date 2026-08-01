@@ -983,7 +983,126 @@ def _ig_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[
 
 
 
+def _fb_cookie_jar() -> dict:
+    p = _cookies_path("facebook")
+    return _netscape_cookies(p) if p else {}
+
+
+_FB_JUNK = (
+    "/rsrc.php", "static.xx.fbcdn", "safe_image", "emoji.php", "/images/",
+    "p50x50", "p60x60", "s60x60", "p32x32", "s32x32", "c0.5", "_n.png",
+)
+
+
+def _fb_photo_key(u: str) -> str:
+    """Identity of a Facebook photo, independent of its size/CDN token."""
+    tail = u.split("?", 1)[0].rsplit("/", 1)[-1]
+    m = re.match(r"(\d+)_(\d+)_(\d+)", tail)
+    return m.group(2) if m else tail
+
+
+def _fb_scrape_images(html_text: str) -> list[str]:
+    """Every distinct post photo found in a Facebook page payload."""
+    found: list[str] = []
+    patterns = (
+        r'"(?:image|photo_image|viewer_image|full_width_image|preferred_thumbnail|'
+        r'comet_photo_attachment_resolution_renderer)"\s*:\s*\{[^{}]*?"uri"\s*:\s*"([^"]+)"',
+        r'"uri"\s*:\s*"(https:\\?/\\?/scontent[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        r'property="og:image"\s+content="([^"]+)"',
+        r'src="(https://scontent[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"',
+        r'href="(https://scontent[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"',
+    )
+    for pat in patterns:
+        for raw in re.findall(pat, html_text or ""):
+            u = _unescape_media_url(raw)
+            if not u.startswith("http"):
+                continue
+            low = u.lower()
+            if any(tok in low for tok in _FB_JUNK):
+                continue
+            if not re.search(r"\.(?:jpg|jpeg|png|webp)", low):
+                continue
+            found.append(u)
+    # de-duplicate by photo identity, keeping the first (largest) variant
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in found:
+        k = _fb_photo_key(u)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(u)
+    return out[:10]
+
+
+def _fb_pages(url: str) -> list[str]:
+    """Every page variant worth scraping for a Facebook post."""
+    low = (url or "").lower()
+    out = [url]
+    if "facebook.com" in low:
+        for host in ("m.facebook.com", "mbasic.facebook.com", "web.facebook.com"):
+            out.append(re.sub(r"//(www\.|m\.|web\.|mbasic\.)?facebook\.com",
+                              f"//{host}", url, count=1))
+        try:
+            import urllib.parse as _up
+            href = _up.quote(url, safe="")
+            out.append("https://www.facebook.com/plugins/post.php"
+                       f"?href={href}&show_text=true&width=750")
+        except Exception:
+            pass
+    return list(dict.fromkeys(out))
+
+
+def _fb_gather_images(url: str) -> tuple[list[str], str]:
+    """Scrape every photo of a Facebook post (carousel aware). Never raises."""
+    jar = _fb_cookie_jar()
+    best: list[str] = []
+    title = "Facebook"
+    for cand in _fb_pages(url):
+        for ua in (_UA_IOS, _UA_DESKTOP):
+            try:
+                r = requests.get(
+                    cand,
+                    headers={
+                        "User-Agent": ua,
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Referer": "https://www.facebook.com/",
+                    },
+                    cookies=jar or None,
+                    timeout=20,
+                    allow_redirects=True,
+                )
+            except Exception:
+                continue
+            if r.status_code != 200 or not r.text:
+                continue
+            tm = re.search(r"<title>([^<]+)</title>", r.text)
+            if tm and title == "Facebook":
+                title = tm.group(1).strip()[:200] or title
+            imgs = _fb_scrape_images(r.text)
+            if len(imgs) > len(best):
+                best = imgs
+            if len(best) >= 2:
+                return best, title
+    return best, title
+
+
+def _fb_download_images(url: str, workdir: str) -> list[str]:
+    """Download every scraped Facebook photo, Telegram-ready (JPEG)."""
+    urls, _ = _fb_gather_images(url)
+    paths: list[str] = []
+    for i, iu in enumerate(urls[:10]):
+        p = os.path.join(workdir, f"fbimg_{i}{_media_ext(iu, '.jpg')}")
+        if _download_file(iu, p, referer="https://www.facebook.com/", ua=_UA_IOS):
+            try:
+                paths.append(_to_jpeg(p))
+            except Exception:
+                paths.append(p)
+    return paths
+
+
 def _fb_fallback_download(url: str, workdir: str, audio_only: bool) -> Optional[dict]:
+
     """Facebook fallback: scrape the mobile/basic page for a direct stream."""
     targets = [url]
     low = (url or "").lower()
