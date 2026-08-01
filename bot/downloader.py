@@ -1095,12 +1095,13 @@ def _sync_download(url: str, workdir: str, progress: Optional[Callable] = None,
         if tik:
             return tik
 
-    # Instagram: when a cookie jar exists yt-dlp is the most reliable path, so
-    # only run the scraping fallback first when we have no cookies.
-    if platform == "instagram" and not _cookies_path("instagram"):
+    # Instagram: the typed resolver chain (cobalt → web API → mirrors) beats
+    # yt-dlp from datacenter IPs, and it never returns a cover image for a reel.
+    if platform == "instagram":
         ig = _ig_fallback_download(url, workdir, audio_only)
         if ig:
             return ig
+
 
 
     # Pre-flight probe (non-fatal if it fails — some sites block extraction-only).
