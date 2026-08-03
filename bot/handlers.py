@@ -95,6 +95,41 @@ async def get_ui_force_join() -> str:
     return (await db.get_setting("ui_force_join", "")) or DEFAULT_FORCE_JOIN_MSG
 
 
+#: Telegram service account that relays linked-channel posts into groups.
+_TG_SERVICE_IDS = {777000, 1087968824}
+
+
+def is_channel_relay(update: Update) -> bool:
+    """
+    True for updates the bot must never answer:
+      * channel posts (edited or not)
+      * linked-channel posts auto-forwarded into the discussion group
+      * messages sent *as* a channel / anonymous admin
+      * Telegram service account (777000) and GroupAnonymousBot
+    """
+    try:
+        chat = update.effective_chat
+        if chat is not None and getattr(chat, "type", "") == "channel":
+            return True
+        if getattr(update, "channel_post", None) or getattr(update, "edited_channel_post", None):
+            return True
+        msg = update.effective_message
+        if msg is not None:
+            if getattr(msg, "is_automatic_forward", False):
+                return True
+            if getattr(msg, "sender_chat", None) is not None:
+                return True
+            frm = getattr(msg, "from_user", None)
+            if frm is not None and frm.id in _TG_SERVICE_IDS:
+                return True
+        user = update.effective_user
+        if user is not None and user.id in _TG_SERVICE_IDS:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 async def _send_force_join_warning(update: Update, context: ContextTypes.DEFAULT_TYPE, channel: str):
     chat = update.effective_chat
     user = update.effective_user
