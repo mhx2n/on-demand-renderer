@@ -3503,6 +3503,10 @@ def register_handlers(app: Application):
     _FREE_CMDS = {"start", "setchannel", "forcejoin"}
 
     async def _global_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        # Linked-channel auto-forwards / channel posts / anonymous admins:
+        # stay completely silent in the discussion group.
+        if is_channel_relay(update):
+            raise ApplicationHandlerStop
         user = update.effective_user
         if user and is_owner(user.id):
             return
