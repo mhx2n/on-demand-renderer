@@ -166,6 +166,9 @@ async def _send_force_join_warning(update: Update, context: ContextTypes.DEFAULT
 
 async def force_join_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     from . import config as cfg
+    # Never gate channel posts or linked-channel auto-forwards / anonymous admins.
+    if is_channel_relay(update):
+        return True
     # Owner-toggleable on/off switch — keeps the configured channel but skips the check.
     enabled = (await db.get_setting("force_join_enabled", "on")).strip().lower()
     if enabled in ("off", "0", "false", "no", "disabled"):
